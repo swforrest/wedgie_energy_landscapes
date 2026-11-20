@@ -1,3 +1,7 @@
+# Manually added
+data/ 
+_website_ignore/
+
 # History files
 .Rhistory
 .Rapp.history
@@ -40,16 +44,16 @@ vignettes/*.pdf
 .Renviron
 .env
 
-# pkgdown site
-docs/
-
 # translation temp files
 po/*~
 
 # RStudio Connect folder
 rsconnect/
 
-# compiled code 
+# compiled code
 src/*.o
 src/*.so
 src/*.dll
+
+/.quarto/
+**/*.quarto_ipynb

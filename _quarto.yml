@@ -1,0 +1,47 @@
+project:
+  type: website
+  output-dir: docs
+  # Render every .qmd in the project root (folders starting with "_",
+  # e.g. _website_ignore/, are skipped automatically)
+  render:
+    - "*.qmd"
+
+execute:
+  # Only re-run code when a document's source changes. Results are stored
+  # in _freeze/, so the site can be rebuilt without the (git-ignored) data.
+  freeze: auto
+
+website:
+  title: "Wedge-tailed eagle modelling"
+  description: "Modelling the behaviours and energy ladnscape of wedge-tailed eagles in Tasmania"
+  site-url: https://swforrest.github.io/wedgie_modelling/
+  repo-url: https://github.com/swforrest/wedgie_modelling
+  repo-actions: [source]
+  page-navigation: true
+  search: true
+  navbar:
+    left:
+      - href: index.qmd
+        text: Home
+        
+      - text: "Behavioural Classification"
+        menu:
+        - href: classification_kmeans_instantaneous.qmd
+          text: "K-means Instantaneous Variables"
+        - href: classification_kmeans_cumulative.qmd
+          text: "K-means Cumulative Variables"
+        
+    right:
+      - icon: github
+        href: https://github.com/swforrest/wedgie_modelling
+        aria-label: GitHub
+  page-footer:
+    left: "Scott Forrest & James Pay"
+    right: "Built with [Quarto](https://quarto.org/)"
+
+format:
+  html:
+    theme:
+      light: cosmo
+      dark: darkly
+    toc: true

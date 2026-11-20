@@ -40,7 +40,7 @@ abstract: |
 ```{r}
 
 library(tidyverse)
-packages <- c("psych", "cluster")
+packages <- c("psych", "cluster", "leaflet")
 walk(packages, require, character.only = T)
 
 ```

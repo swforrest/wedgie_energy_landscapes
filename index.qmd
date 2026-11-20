@@ -9,7 +9,7 @@ This site collects the analysis notebooks for modelling the flight behaviour of 
 ## Behaviour classification
 
 - [K-means Instantaneous Variable](classification_kmeans_instantaneous.qmd): using variables calculated for each GPS fix to estimate behavioural states.
-- [K-means Cumulative Variables](classification_kmeans_cumulative.qmd): using variables that aggregate over a moving window (such as cumulative turning angles or average speed) to estimate behavioural states. This approach helps to smooth over jumpy states when using k-means, which treats each each sample independently.
+- [K-means Aggregated Variables](classification_kmeans_aggregated.qmd): using variables that aggregate over a moving window (such as cumulative turning angles or average speed) to estimate behavioural states. This approach helps to smooth over jumpy states when using k-means, which treats each each sample independently.
 
 ## Modelling the energy landscape
 

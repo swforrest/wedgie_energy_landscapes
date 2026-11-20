@@ -28,8 +28,8 @@ website:
         menu:
         - href: classification_kmeans_instantaneous.qmd
           text: "K-means Instantaneous Variables"
-        - href: classification_kmeans_cumulative.qmd
-          text: "K-means Cumulative Variables"
+        - href: classification_kmeans_aggregated.qmd
+          text: "K-means Aggregated Variables"
         
     right:
       - icon: github

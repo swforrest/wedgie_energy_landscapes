@@ -32,7 +32,7 @@ editor:
 editor_options: 
   chunk_output_type: inline
 abstract: |
-  Using k-means clustering to estimate behavioural states from high-frequency 3D GPS-tracking data. Here we use instantaneous flight variables (rate of ascent/descent, speed, turn angle, and absolute vertical rate) to classify the behavioural states of wedge-tailed eagles. These are the same variables used by @Bergen2022-rj.
+  Using k-means clustering to estimate behavioural states from high-frequency 3D GPS-tracking data. Here we use aggregated flight variables (average rate of ascent/descent and speed, and cumulatives turn angles) to classify the behavioural states of wedge-tailed eagles. These are the same variables used by @Bergen2022-rj.
 ---
 
 # Load packages
@@ -125,44 +125,17 @@ segment_lengths %>%
 
 ```{r}
 
+eagle_data <- eagle_data %>% rename(F_Vrate_abs = F_absVrate)
+
 eagle_data <- eagle_data %>% 
   mutate(
+    F_radians = step_ta,                  # step_ta was already in radians
     F_radians_abs = abs(F_radians),       # make radian absolute value
     F_AOG = ifelse(F_AOG < 0 ,0, F_AOG),  # make all negative AOG values 0
-    .after = F_absVrate
-   ) %>% 
-  rename(F_Vrate_abs = F_absVrate)
+    .after = F_Vrate_abs
+   )
 
 head(eagle_data, 10)
-
-```
-
-## Plot the flight variables
-
-```{r}
-#| results: asis
-
-variable_names <- eagle_data %>% select(F_AOG:F_radians_abs) %>% names()
-
-cat("::: {.panel-tabset}\n\n")
-
-for(i in 1:length(variable_names)) {
-  
-  variable <- variable_names[[i]]
-  
-  p <- ggplot(data = eagle_data) + 
-    geom_histogram(aes(x = .data[[variable]]),
-                   bins = 60, fill = "skyblue", colour = "black") +
-    ggtitle(variable) +
-    theme_bw()
-  
-  # one tab per model: heading first, then the plot
-  cat("\n\n#### ", variable, "\n\n")
-  print(p)
-  
-}
-
-cat("\n\n:::\n")
 
 ```
 
@@ -176,57 +149,140 @@ eagle_data <- eagle_data %>%
 
 ```
 
-## Plot the flight variables after truncating vertical rate
+### Drop rows with very low speeds
+
+```{r}
+
+eagle_data <- eagle_data %>% filter(F_Sn >= 1)
+
+```
+
+
+## Create aggregated features
+
+For each location (the focal fix) we summarise the flight variables over a centred moving window that extends `half_window_s` seconds before and after it, within the same flight segment. As the data are classified after the fact, a centred window avoids shifting the detected transitions later in time (as a backward-only window would). Windows are based on time rather than a number of fixes, as the fix-intervals vary (mostly 3–5 s).
+
+Within each window we calculate:
+
+* `turn_cum` - the cumulative **signed** turning angle (radians). When thermalling the turns all have the same sign, so the sum grows steadily (roughly 2π per circle), whereas the GPS jitter of a perched or slow bird has a random sign and largely cancels out.
+* `speed_mean` - the mean ground speed (m/s, from `F_Sn`).
+* `Vrate_mean` - the mean **signed** vertical rate (m/s, from `F_Vrate`), i.e. the net climb or descent.
+* `straightness` - the net displacement across the window divided by the path length (0 = returning to the start, 1 = perfectly straight). This separates directional flight from circling, and complements `turn_cum` for perched/slow birds (low straightness but little net turning).
+* `n_fixes` - the number of fixes in the window. This is not for clustering, but shows where windows are truncated at the start and end of flight segments (or across gaps in the data).
+
+The turning angle is taken from `step_ta`, which is in radians. The turning angle of the first fix of each flight segment is relative to a step outside that segment, so it is set to 0.
+
+The windows are calculated after removing the extreme vertical rates (so they don't contaminate the window means), but before the low-speed rows are dropped below. Where fixes are missing, straightness uses the straight line between the remaining fixes. Each column gets a `_w` suffix with the half-width (e.g. `F_turn_cum_w30`), so the function can be called again with a different `half_window_s` to add features at a second time scale (e.g. 10 s to capture finer-scale flap-glide alternation).
+
+```{r}
+
+# half-width of the window in seconds (the window covers this many seconds
+# before AND after the focal fix)
+half_window_s <- 30
+
+# sum of x across each window, using cumulative sums (fast on millions of rows).
+# lo and hi are the indices of the first and last fixes in each window
+window_sum <- function(x, lo, hi) {
+  cs <- c(0, cumsum(x))
+  cs[hi + 1] - cs[lo]
+}
+
+add_window_features <- function(data, half_window_s) {
+
+  data %>%
+    arrange(name, flight_n, stepend_dtime) %>%
+    group_by(name, flight_n) %>%
+    mutate(
+      t = as.numeric(stepend_dtime),
+      # first and last fixes within +/- half_window_s of each focal fix
+      lo = findInterval(t - half_window_s, t, left.open = TRUE) + 1,
+      hi = findInterval(t + half_window_s, t),
+      n_fixes = hi - lo + 1,
+      # turning angle (radians), ignoring the turn at the start of each flight segment
+      ta = if_else(row_number() == 1, 0, step_ta),
+      turn_cum = window_sum(ta, lo, hi),
+      speed_mean = window_sum(F_Sn, lo, hi) / n_fixes,
+      Vrate_mean = window_sum(F_Vrate, lo, hi) / n_fixes,
+      # net displacement / path length, both from the positions of the fixes in the
+      # window (so it stays <= 1 even when fixes have been filtered out). seg is the
+      # distance from the previous fix, so the path in a window is the sum of
+      # seg over fixes lo+1 to hi
+      seg = c(0, sqrt(diff(stepend_utme)^2 + diff(stepend_utmn)^2)),
+      path_length = window_sum(seg, lo, hi) - seg[lo],
+      displacement = sqrt((stepend_utme[hi] - stepend_utme[lo])^2 +
+                            (stepend_utmn[hi] - stepend_utmn[lo])^2),
+      straightness = if_else(path_length > 0, displacement / path_length, 0),
+      .after = F_radians_abs
+    ) %>%
+    ungroup() %>%
+    select(-c(t, lo, hi, ta, seg, path_length, displacement)) %>%
+    rename_with(\(x) paste0("F_", x, "_w", half_window_s),
+                c(turn_cum, speed_mean, Vrate_mean, straightness)) %>%
+    rename_with(\(x) paste0(x, "_w", half_window_s), n_fixes)
+
+}
+
+eagle_data <- add_window_features(eagle_data, half_window_s)
+
+# window feature names, used for plotting below
+window_vars <- paste0(c("F_turn_cum", "F_speed_mean", "F_Vrate_mean", "F_straightness"),
+                      "_w", half_window_s)
+
+eagle_data %>%
+  select(stepend_dtime, flight_n, F_Sn, F_Vrate, step_ta,
+         all_of(window_vars), paste0("n_fixes_w", half_window_s)) %>%
+  head(20)
+
+```
+
+### Plot the aggregated features
 
 ```{r}
 #| results: asis
 
-variable_names <- eagle_data %>% select(F_AOG:F_radians_abs) %>% names()
-
 cat("::: {.panel-tabset}\n\n")
 
-for(i in 1:length(variable_names)) {
-  
-  variable <- variable_names[[i]]
-   
-  p <- ggplot(data = eagle_data) + 
+for(variable in c(window_vars, paste0("n_fixes_w", half_window_s))) {
+
+  p <- ggplot(data = eagle_data) +
     geom_histogram(aes(x = .data[[variable]]),
-                   bins = 60, fill = "skyblue", colour = "black") +
+                   bins = 100, fill = "skyblue", colour = "black") +
     ggtitle(variable) +
     theme_bw()
-  
-  # one tab per model: heading first, then the plot
+
   cat("\n\n#### ", variable, "\n\n")
   print(p)
-  
+
 }
 
 cat("\n\n:::\n")
 
 ```
 
-## Square-root transform the skewed variables
+## Transform variables
 
 ```{r}
 
 eagle_data <- eagle_data %>% 
   mutate(
+    # take the square root of skewed (positive) variables
     F_AOG_sqrt = sqrt(F_AOG), 
     F_Sn_sqrt = sqrt(F_Sn), 
     F_Vrate_abs_sqrt = sqrt(F_Vrate_abs), 
     F_radians_abs_sqrt = sqrt(F_radians_abs), 
     F_speed_sqrt = sqrt(F_speed),
-    .after = F_radians_abs
+    F_turn_cum_w30_abs = abs(F_turn_cum_w30),
+    .after= F_turn_cum_w30
     )
 
 ```
 
-## Plot the transformed flight variables
+## All possible flight variables
 
 ```{r}
 #| results: asis
 
-variable_names <- eagle_data %>% select(F_AOG:F_speed_sqrt) %>% names()
+variable_names <- eagle_data %>% select(F_AOG:F_straightness_w30) %>% names()
 
 cat("::: {.panel-tabset}\n\n")
 
@@ -250,28 +306,6 @@ cat("\n\n:::\n")
 
 ```
 
-## Drop rows with very low speeds
-
-There appear to be some very low speed values that are likely to be perching or other non-flight behaviours. We'll drop any rows with speeds less than 1 m/s.
-
-```{r}
-
-ggplot(data = eagle_data) + 
-  geom_histogram(aes(x = F_Sn),
-                 bins = 100, fill = "skyblue", colour = "black") +
-  scale_x_continuous(breaks = seq(0, 100, by = 2)) +
-  theme_bw()
-
-eagle_data <- eagle_data %>% filter(F_Sn >= 1)
-
-ggplot(data = eagle_data) + 
-  geom_histogram(aes(x = F_Sn),
-                 bins = 100, fill = "skyblue", colour = "black") +
-  scale_x_continuous(breaks = seq(0, 100, by = 2)) +
-  theme_bw()
-
-```
-
 # Data explorer
 
 We want to visually assess the flight paths with respect to the flight variables.
@@ -285,10 +319,12 @@ The colour scales are clipped to the 1st–99th percentiles of each variable so 
 library(leaflet)
 
 # the variables plotted in the previous chunks
-explore_vars <- c("F_AOG", "F_radians", "F_speed", "F_Sn", "F_Vrate", "F_Vrate_abs", "F_radians_abs")
+explore_vars <- c("F_AOG", "F_radians", "F_speed", "F_Sn", "F_Vrate", "F_Vrate_abs", "F_radians_abs",
+                  window_vars, "F_turn_cum_w30_abs")
 
 # variables with negative and positive values get a diverging palette centred on 0
-diverging_vars <- c("F_radians", "F_Vrate")
+diverging_vars <- c("F_radians", "F_Vrate",
+                    paste0(c("F_turn_cum", "F_Vrate_mean"), "_w", half_window_s))
 
 # written as a function so it can be re-used later, e.g. with the k-means
 # behaviour labels: flight_explorer(segment_to_plot, c("behavior", explore_vars))
@@ -419,11 +455,15 @@ We will pull out the same variables used in @Bergen2022-rj, and scale them to ha
 ready_to_cluster <- eagle_data %>%
   select(
     # F_AOG_sqrt,
-    F_radians_abs_sqrt, 
-    F_Sn_sqrt, 
+    # F_radians_abs_sqrt, 
+    # F_Sn_sqrt, 
     # F_speed_sqrt,
-    F_Vrate, 
+    # F_Vrate, 
     # F_Vrate_abs
+    F_turn_cum_w30_abs,
+    F_speed_mean_w30,
+    F_Vrate_mean_w30,
+    F_straightness_w30
     ) %>%
   scale()
 
@@ -458,54 +498,24 @@ Will investigate for K in (2:7) as in paper. 10 random starting centroids each t
 set.seed(234) 
 k2 <- kmeans(ready_to_cluster, centers = 2, nstart = 10, iter.max = 30)
 
-```
-
-
-
-```{r}
-
 set.seed(234) 
 k3 <- kmeans(ready_to_cluster, centers = 3, nstart = 10, iter.max = 30)
-
-```
-
-
-
-```{r}
 
 set.seed(234) 
 k4 <- kmeans(ready_to_cluster, centers = 4, nstart = 10, iter.max = 30)
 
-```
-
-
-
-```{r}
-
 set.seed(234) 
 k5 <- kmeans(ready_to_cluster, centers = 5, nstart = 10, iter.max = 30)
 
-```
-
-
-
-```{r}
-
 set.seed(234) 
 k6 <- kmeans(ready_to_cluster, centers = 6, nstart = 10, iter.max = 30)
-
-```
-
-
-
-```{r}
 
 set.seed(234) 
 k7 <- kmeans(ready_to_cluster, centers = 7, nstart = 10, iter.max = 30)
 
 ```
 
-
+## Check convergence
 
 ```{r}
 
@@ -719,8 +729,8 @@ Also, we have tried to remove perching fixes beforehand (but some still may rema
 eagle_subset <- eagle_subset %>% 
   mutate(behavior = case_when(
                               k3==1~'gliding',
-                              k3==2~'flapping',
-                              k3==3~'ascending')
+                              k3==2~'ascending',
+                              k3==3~'flapping')
          ) %>% 
   mutate(behavior = factor(behavior, levels = c('gliding','ascending','flapping')))
 
@@ -849,6 +859,19 @@ ggplot(data = segment_to_plot,aes(x = seconds, y = F_Sn)) +
 
 ```
 
+## Average speed
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_speed_mean_w30)) +
+  geom_line(aes(x=seconds,y=F_speed_mean_w30), color = "grey") +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
 ## Vertical rate
 
 ```{r}
@@ -856,6 +879,20 @@ ggplot(data = segment_to_plot,aes(x = seconds, y = F_Sn)) +
 ggplot(data = segment_to_plot,aes(x = seconds, y = F_Vrate)) +
   geom_hline(aes(yintercept=0), linetype="dashed") +
   geom_line(aes(x=seconds,y=F_Vrate), color = "grey") +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+## Average vertical rate
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_Vrate_mean_w30)) +
+  geom_hline(aes(yintercept=0), linetype="dashed") +
+  geom_line(aes(x=seconds,y=F_Vrate_mean_w30), color = "grey") +
   geom_point(aes(col = as.factor(behavior)),size=.5) + 
   scale_color_manual(values = cbpal[c(1,2,4,5)]) +
   theme_light() +
@@ -877,6 +914,20 @@ ggplot(data = segment_to_plot,aes(x = seconds, y = F_radians)) +
 
 ```
 
+## Cumulative turning angles
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_turn_cum_w30)) +
+  geom_hline(aes(yintercept=0), linetype="dashed") +
+  geom_line(aes(x=seconds,y=F_turn_cum_w30), color = "grey") +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
 :::
 
 # Data explorer with states
@@ -888,10 +939,12 @@ The same data explorer as above but this time also coloured by states (behaviour
 library(leaflet)
 
 # the variables plotted in the previous chunks
-explore_vars <- c("F_AOG", "F_radians", "F_speed", "F_Sn", "F_Vrate", "F_Vrate_abs", "F_radians_abs", "k3")
+explore_vars <- c("F_AOG", "F_radians", "F_speed", "F_Sn", "F_Vrate", "F_Vrate_abs", "F_radians_abs",
+                  window_vars, "F_turn_cum_w30_abs", "k3")
 
 # variables with negative and positive values get a diverging palette centred on 0
-diverging_vars <- c("F_radians", "F_Vrate")
+diverging_vars <- c("F_radians", "F_Vrate",
+                    paste0(c("F_turn_cum", "F_Vrate_mean"), "_w", half_window_s))
 
 # written as a function so it can be re-used later, e.g. with the k-means
 # behaviour labels: flight_explorer(segment_to_plot, c("behavior", explore_vars))
@@ -1032,9 +1085,9 @@ transition_data = transition_data %>%
 transition_data = transition_data %>% 
   mutate(old = case_when(
     k3==1~'gliding',
-    k3==2~'flapping',
-    k3==3~'ascending')) %>% 
-  mutate(old = factor(old, levels = c('gliding','flapping','ascending')))
+    k3==2~'ascending',
+    k3==3~'flapping')) %>% 
+  mutate(old = factor(old, levels = c('gliding','ascending', 'flapping')))
 
 # get the state at the next location
 transition_data = transition_data %>%
@@ -1057,9 +1110,9 @@ as.data.frame(transMat)
 eagle_data <- eagle_data %>% 
   mutate(behavior = case_when(
     k3==1~'gliding',
-    k3==2~'flapping',
-    k3==3~'ascending')) %>% 
-  mutate(behavior = factor(behavior, levels = c('gliding','flapping','ascending')))
+    k3==2~'ascending',
+    k3==3~'flapping')) %>% 
+  mutate(behavior = factor(behavior, levels = c('gliding','ascending', 'flapping')))
 
 # plotdat = eagledata5[eagledata5$name == "Floki" | eagledata5$name == "Ernie" | eagledata5$name == "Maxie" ,]
 # plotdat = eagledata5

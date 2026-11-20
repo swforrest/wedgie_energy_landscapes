@@ -32,7 +32,7 @@ editor:
 editor_options: 
   chunk_output_type: inline
 abstract: |
-  Using k-means clustering to estimate behavioural states from high-frequency 3D GPS-tracking data. Here we use instantaneous flight variables (rate of ascent/descent, speed, turn angle, and absolute vertical rate) to classify the behavioural states of wedge-tailed eagles. These are the same variables used by @Bergen2022-rj.
+  Using k-means clustering to estimate behavioural states from high-frequency 3D GPS-tracking data. Here we use instantaneous flight variables (rate of ascent/descent, speed, and absolute turn angles) to classify the behavioural states of wedge-tailed eagles. These are the same variables used by @Bergen2022-rj.
 ---
 
 # Load packages
@@ -125,13 +125,15 @@ segment_lengths %>%
 
 ```{r}
 
+eagle_data <- eagle_data %>% rename(F_Vrate_abs = F_absVrate)
+
 eagle_data <- eagle_data %>% 
   mutate(
+    F_radians = step_ta,                  # step_ta was already in radians
     F_radians_abs = abs(F_radians),       # make radian absolute value
     F_AOG = ifelse(F_AOG < 0 ,0, F_AOG),  # make all negative AOG values 0
-    .after = F_absVrate
-   ) %>% 
-  rename(F_Vrate_abs = F_absVrate)
+    .after = F_Vrate_abs
+   )
 
 head(eagle_data, 10)
 
@@ -281,8 +283,6 @@ A single flight segment is plotted over a satellite basemap. Hover over a locati
 The colour scales are clipped to the 1st–99th percentiles of each variable so that a few extreme values don't wash out the colours (the hover values are unclipped). Variables that take both negative and positive values (`F_Vrate` and `F_radians`) use a diverging palette centred on 0 (red = positive, blue = negative).
 
 ```{r}
-
-library(leaflet)
 
 # the variables plotted in the previous chunks
 explore_vars <- c("F_AOG", "F_radians", "F_speed", "F_Sn", "F_Vrate", "F_Vrate_abs", "F_radians_abs")
@@ -718,11 +718,11 @@ Also, we have tried to remove perching fixes beforehand (but some still may rema
 
 eagle_subset <- eagle_subset %>% 
   mutate(behavior = case_when(
-                              k3==1~'gliding',
-                              k3==2~'flapping',
-                              k3==3~'ascending')
+                              k3==1~'ascending',
+                              k3==2~'gliding',
+                              k3==3~'flapping')
          ) %>% 
-  mutate(behavior = factor(behavior, levels = c('gliding','ascending','flapping')))
+  mutate(behavior = factor(behavior, levels = c('ascending','gliding','flapping')))
 
 ```
 
@@ -885,8 +885,6 @@ The same data explorer as above but this time also coloured by states (behaviour
 
 ```{r}
 
-library(leaflet)
-
 # the variables plotted in the previous chunks
 explore_vars <- c("F_AOG", "F_radians", "F_speed", "F_Sn", "F_Vrate", "F_Vrate_abs", "F_radians_abs", "k3")
 
@@ -1031,10 +1029,10 @@ transition_data = transition_data %>%
 # get behavioural transitions
 transition_data = transition_data %>% 
   mutate(old = case_when(
-    k3==1~'gliding',
-    k3==2~'flapping',
-    k3==3~'ascending')) %>% 
-  mutate(old = factor(old, levels = c('gliding','flapping','ascending')))
+    k3==1~'ascending',
+    k3==2~'gliding',
+    k3==3~'flapping')) %>% 
+  mutate(old = factor(old, levels = c('ascending','gliding','flapping')))
 
 # get the state at the next location
 transition_data = transition_data %>%
@@ -1056,10 +1054,10 @@ as.data.frame(transMat)
 
 eagle_data <- eagle_data %>% 
   mutate(behavior = case_when(
-    k3==1~'gliding',
-    k3==2~'flapping',
-    k3==3~'ascending')) %>% 
-  mutate(behavior = factor(behavior, levels = c('gliding','flapping','ascending')))
+    k3==1~'ascending',
+    k3==2~'gliding',
+    k3==3~'flapping')) %>% 
+  mutate(behavior = factor(behavior, levels = c('ascending','gliding','flapping')))
 
 # plotdat = eagledata5[eagledata5$name == "Floki" | eagledata5$name == "Ernie" | eagledata5$name == "Maxie" ,]
 # plotdat = eagledata5

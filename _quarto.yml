@@ -30,6 +30,10 @@ website:
           text: "K-means Instantaneous Variables"
         - href: classification_kmeans_aggregated.qmd
           text: "K-means Aggregated Variables"
+        - href: classification_kmeans_combined.qmd
+          text: "K-means Combined Variables"
+        - href: classification_hmm_instantaneous.qmd
+          text: "HMM Instantaneous Variables"
         
     right:
       - icon: github

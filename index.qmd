@@ -10,6 +10,8 @@ This site collects the analysis notebooks for modelling the flight behaviour of 
 
 - [K-means Instantaneous Variable](classification_kmeans_instantaneous.qmd): using variables calculated for each GPS fix to estimate behavioural states.
 - [K-means Aggregated Variables](classification_kmeans_aggregated.qmd): using variables that aggregate over a moving window (such as cumulative turning angles or average speed) to estimate behavioural states. This approach helps to smooth over jumpy states when using k-means, which treats each each sample independently.
+- [K-means Combined Variables](classification_kmeans_combined.qmd): using both instantaneous and aggregated variables to estimate behavioural states.
+- [Hidden Markov Model](classification_hmm_instantaneous.qmd): using a Hidden Markov Model to estimate behavioural states based on the observed GPS data.
 
 ## Modelling the energy landscape
 

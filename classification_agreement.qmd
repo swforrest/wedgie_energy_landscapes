@@ -1,0 +1,70 @@
+---
+title: "Wedge-tailed eagle behavioural classification"
+subtitle: "Agreement between methods"
+author: 
+  - name: "Scott Forrest"
+    url: https://swforrest.github.io/
+    orcid: 0000-0001-9529-0108
+    affiliation: University of Tasmania, QUT
+    email: "scottwforrest@gmail.com"
+  - name: "James Pay"
+    affiliation: University of Tasmania
+date: "`r Sys.Date()`"
+execute:
+  cache: false
+  warning: false
+bibliography: references.bib
+toc: true
+number-sections: false
+format: 
+  html:
+    # self-contained: true    
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    df-print: paged
+    code-line-numbers: true
+    code-overflow: scroll
+    fig-format: png
+    fig-dpi: 150
+editor:
+  source
+editor_options: 
+  chunk_output_type: inline
+abstract: |
+  Compare the state classifications based on k-means with different input variables, and hidden Markov models (HMMs).
+---
+
+# Load packages
+
+```{r}
+
+library(tidyverse)
+packages <- c("leaflet")
+walk(packages, require, character.only = T)
+
+```
+
+# Import data from the model outputs
+
+```{r}
+
+kmeans_instantaneous <- read_csv("outputs/eagle_states_kmeans_instantaneous_Stella.csv")
+kmeans_aggregated <- read_csv("outputs/eagle_states_kmeans_aggregated_Stella.csv")
+kmeans_combined <- read_csv("outputs/eagle_states_kmeans_combined_Stella.csv")
+hmm_instantaneous <- read_csv("outputs/eagle_states_hmm_instantaneous_Stella.csv")
+
+```
+
+# References
+
+::: {#refs}
+:::
+
+# Session Information
+
+```{r}
+
+utils::sessionInfo()
+
+```

@@ -40,7 +40,7 @@ abstract: |
 ```{r}
 
 library(tidyverse)
-packages <- c("psych", "cluster")
+packages <- c("psych", "cluster", "leaflet")
 walk(packages, require, character.only = T)
 
 ```
@@ -78,13 +78,19 @@ To reduce the dataset while testing models, we'll use a single eagle's data - St
 
 ```{r}
 
-focal_eagle = "Stella"
+# to use all data
+# which_data <- "all"
 
-# # to keep all data
-# eagle_data <- eagledata4
+# to pick a single eagle's data
+which_data <- "Stella"
 
-# to use the subset of data for Stella
-eagle_data <- eagledata4 %>% filter(name == focal_eagle)
+if(which_data == "all") {
+  # keep all data
+  eagle_data <- eagledata4
+  } else {
+    # filter to the single eagle
+    eagle_data <- eagledata4 %>% filter(name == which_data)
+  }
 
 ```
 
@@ -609,6 +615,14 @@ eagle_data <- eagle_data %>%
 
 ```
 
+## Write the data to CSV
+
+```{r}
+
+write_csv(eagle_data, paste0("outputs/eagle_states_kmeans_aggregated_", which_data, ".csv"))
+
+```
+
 ## PCA 
 
 ```{r}
@@ -636,9 +650,11 @@ cbpal <- c("#009E73","#F0E442", "#000000", "#D55E00","#56B4E9","#999999","#CC79A
 
 ### If using all eagle's data, subset again here
 
+We subset here regardless for plotting efficiency.
+
 ```{r}
 
-eagle_subset = eagle_data[eagle_data$name == focal_eagle,] 
+eagle_subset <- eagledata4 %>% filter(name == which_data)
 
 ```
 
@@ -726,13 +742,19 @@ Also, we have tried to remove perching fixes beforehand (but some still may rema
 
 ```{r}
 
+state_1 <- "gliding"
+state_2 <- "ascending"
+state_3 <- "flapping"
+# state_4 <- "..."
+
 eagle_subset <- eagle_subset %>% 
   mutate(behavior = case_when(
-                              k3==1~'gliding',
-                              k3==2~'ascending',
-                              k3==3~'flapping')
+                              k3==1~state_1,
+                              k3==2~state_2,
+                              k3==3~state_3)
          ) %>% 
-  mutate(behavior = factor(behavior, levels = c('gliding','ascending','flapping')))
+  # reorder the levels
+  mutate(behavior = factor(behavior, levels = c("ascending", "flapping", "gliding")))
 
 ```
 
@@ -1084,10 +1106,11 @@ transition_data = transition_data %>%
 # get behavioural transitions
 transition_data = transition_data %>% 
   mutate(old = case_when(
-    k3==1~'gliding',
-    k3==2~'ascending',
-    k3==3~'flapping')) %>% 
-  mutate(old = factor(old, levels = c('gliding','ascending', 'flapping')))
+    k3==1~state_1,
+    k3==2~state_2,
+    k3==3~state_3)) %>% 
+  # reorder the levels
+  mutate(old = factor(old, levels = c('ascending','flapping','gliding')))
 
 # get the state at the next location
 transition_data = transition_data %>%
@@ -1103,16 +1126,39 @@ as.data.frame(transMat)
 
 ```
 
+## Plot a transition matrix
+
+```{r}
+
+trans_df <- as.data.frame(transMat)
+
+trans_df$new2 <- factor(trans_df$new2,
+                        levels = c("ascending", "flapping", "gliding", "segment end"))
+
+ggplot(trans_df, aes(x = new2, y = old, fill = Freq)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = round(Freq, 2)), size = 4) +
+  scale_fill_gradient(low = "white", high = "steelblue", limits = c(0, 1)) +
+  scale_y_discrete(limits = rev) +   # first state at the top, like a matrix
+  labs(x = "Next behaviour", y = "Current behaviour",
+       fill = "Probability",
+       title = "Behavioural transition probabilities") +
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+
+```
+
 # Proportion of points
 
 ```{r}
 
 eagle_data <- eagle_data %>% 
   mutate(behavior = case_when(
-    k3==1~'gliding',
-    k3==2~'ascending',
-    k3==3~'flapping')) %>% 
-  mutate(behavior = factor(behavior, levels = c('gliding','ascending', 'flapping')))
+    k3==1~state_1,
+    k3==2~state_2,
+    k3==3~state_3)) %>% 
+  # reorder the levels
+  mutate(behavior = factor(behavior, levels = c("ascending", "flapping", "gliding")))
 
 # plotdat = eagledata5[eagledata5$name == "Floki" | eagledata5$name == "Ernie" | eagledata5$name == "Maxie" ,]
 # plotdat = eagledata5

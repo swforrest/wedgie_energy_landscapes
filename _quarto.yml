@@ -14,7 +14,7 @@ execute:
 website:
   title: "Wedge-tailed eagle modelling"
   favicon: icons/wedgie_silhouette.svg
-  description: "Modelling the behaviours and energy ladnscape of wedge-tailed eagles in Tasmania"
+  description: "Modelling the behaviours and energy landscape of wedge-tailed eagles in Tasmania"
   site-url: https://swforrest.github.io/wedgie_modelling/
   repo-url: https://github.com/swforrest/wedgie_modelling
   repo-actions: [source]
@@ -33,11 +33,29 @@ website:
           text: "K-means Aggregated Variables"
         - href: classification_kmeans_combined.qmd
           text: "K-means Combined Variables"
-        - href: classification_hmm_instantaneous.qmd
-          text: "HMM Instantaneous Variables"
+        - href: classification_hmm.qmd
+          text: "Hidden Markov Models"
+        - href: classification_EMbC_aggregated.qmd
+          text: "EMbC Aggregated Variables"
         - href: classification_agreement.qmd
           text: "Agreement Between Methods"
-        
+
+      - text: "Energy Landscape"
+        menu:
+        # items with only 'text' are section headers, and "---" is a divider line
+        - text: "Data"
+        - href: energy_harvesting.qmd
+          text: "Soaring Bouts and Energy Harvesting Data"
+        # uncomment and fill in as the model and prediction scripts are added
+        # - text: "---"
+        # - text: "Models"
+        # - href: energy_landscape_models.qmd
+        #   text: "Energy Landscape Models"
+        # - text: "---"
+        # - text: "Predictions"
+        # - href: energy_landscape_predictions.qmd
+        #   text: "Energy Landscape Predictions"
+
     right:
       - icon: github
         href: https://github.com/swforrest/wedgie_modelling

@@ -468,8 +468,8 @@ ready_to_cluster <- eagle_data %>%
     # F_Vrate_abs
     F_turn_cum_window_abs,
     F_speed_mean_window,
-    F_Vrate_mean_window,
-    F_straightness_window
+    F_Vrate_mean_window
+    # F_straightness_window
     ) %>%
   scale()
 

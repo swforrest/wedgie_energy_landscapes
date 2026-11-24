@@ -11,10 +11,28 @@ This site collects the analysis notebooks for modelling the flight behaviour of 
 - [K-means Instantaneous Variable](classification_kmeans_instantaneous.qmd): using variables calculated for each GPS fix to estimate behavioural states.
 - [K-means Aggregated Variables](classification_kmeans_aggregated.qmd): using variables that aggregate over a moving window (such as cumulative turning angles or average speed) to estimate behavioural states. This approach helps to smooth over jumpy states when using k-means, which treats each each sample independently.
 - [K-means Combined Variables](classification_kmeans_combined.qmd): using both instantaneous and aggregated variables to estimate behavioural states.
-- [Hidden Markov Model](classification_hmm_instantaneous.qmd): using a Hidden Markov Model to estimate behavioural states based on the observed GPS data.
+- [Hidden Markov Model](classification_hmm.qmd): using a Hidden Markov Model to estimate behavioural states based on the observed GPS data.
+- [EMbC Aggregated Variables](classification_EMbC_aggregated.qmd): using expectation-maximisation binary clustering (EMbC) on the absolute cumulative turning angle and mean vertical rate over a moving window, following Scacco et al. (2019). The vertical rate split is fixed at 0 to separate gliding from soaring and flapping, and the states are smoothed after classification.
 - [Agreement Between Methods](classification_agreement.qmd): comparing the states from the 3-state k-means and HMM classifications.
 
 ## Modelling the energy landscape
 
+Using the soaring behaviour identified by the classification methods to determine where wedge-tailed eagles 'harvest' environmental energy (uplift from thermals and wind deflected off terrain), and how this relates to landscape features.
+
+### Data
+
+- [Soaring Bouts and Energy Harvesting Data](energy_harvesting.qmd): selecting the fixes that most of the classification methods agree are soaring (ascending), splitting them into soaring bouts, and summarising when and where the eagles soar and how much altitude they gain. This creates the data that will be used to associate soaring with landscape variables (such as elevation, topographic position and ridges), but doesn't do the modelling itself.
+
+<!-- Uncomment and fill in as the model and prediction scripts are added (and add them to the navbar in _quarto.yml)
+
+### Models
+
+- [Energy Landscape Models](energy_landscape_models.qmd):
+
+### Predictions
+
+- [Energy Landscape Predictions](energy_landscape_predictions.qmd):
+
+-->
 
 

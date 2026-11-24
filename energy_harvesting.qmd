@@ -1,0 +1,865 @@
+---
+title: "Wedge-tailed eagle energy harvesting"
+subtitle: "Identifying soaring bouts and preparing the data for the energy landscape models"
+author:
+  - name: "Scott Forrest"
+    url: https://swforrest.github.io/
+    orcid: 0000-0001-9529-0108
+    affiliation: University of Tasmania, QUT
+    email: "scottwforrest@gmail.com"
+  - name: "James Pay"
+    affiliation: University of Tasmania
+date: "`r Sys.Date()`"
+execute:
+  cache: false
+  warning: false
+bibliography: references.bib
+toc: true
+number-sections: false
+format:
+  html:
+    # self-contained: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    df-print: paged
+    code-line-numbers: true
+    code-overflow: scroll
+    fig-format: png
+    fig-dpi: 150
+editor:
+  source
+editor_options:
+  chunk_output_type: inline
+abstract: |
+  Here we use the behavioural states estimated by the classification methods to identify where and when wedge-tailed eagles 'harvest' environmental energy by soaring. We select the fixes that most methods agree are soaring, split them into soaring bouts, and summarise the time spent soaring and the altitude gained through time and space. This creates the data that will be used to associate soaring with landscape features (such as elevation, topographic position and ridges) - the modelling and predictions are done in separate scripts.
+---
+
+# Load packages
+
+```{r}
+
+library(tidyverse)
+packages <- c("leaflet", "terra", "tidyterra")
+walk(packages, require, character.only = T)
+
+```
+
+# Import data from the model outputs
+
+```{r}
+
+kmeans_instantaneous <- read_csv("outputs/eagle_states_kmeans_instantaneous_Stella.csv")
+kmeans_aggregated <- read_csv("outputs/eagle_states_kmeans_aggregated_Stella.csv")
+kmeans_combined <- read_csv("outputs/eagle_states_kmeans_combined_Stella.csv")
+hmm <- read_csv("outputs/eagle_states_hmm_Stella.csv")
+
+```
+
+## Join the dataframes
+
+The dataframes have different numbers of rows, as some variables had NAs in some of the scripts but not others. We join them by the eagle's name and the start time of each step, and then only keep the fixes that were classified by all four methods.
+
+We keep the location and flight variables from the k-means instantaneous data, and only the 3-state classifications from the others (plus the probability of the most likely state from the 3-state HMM).
+
+```{r}
+
+# number of rows in each dataframe
+tibble(data = c("kmeans_instantaneous", "kmeans_aggregated", "kmeans_combined", "hmm"),
+       rows = c(nrow(kmeans_instantaneous), nrow(kmeans_aggregated),
+                nrow(kmeans_combined), nrow(hmm)))
+
+eagle_states <- kmeans_combined %>%
+  select(name, stepstart_dtime, stepend_dtime, 
+         stepend_utme, stepend_utmn,
+         flight_n, lat, lon,
+         F_AOG, F_Sn, F_Vrate, F_radians, F_radians_abs, 
+         F_turn_cum_window, F_speed_mean_window, F_Vrate_mean_window,
+         kmeans_comb = k3) %>%
+  full_join(kmeans_aggregated %>% select(name, stepstart_dtime, kmeans_agg = k3),
+            by = c("name", "stepstart_dtime")) %>%
+  full_join(kmeans_instantaneous %>% select(name, stepstart_dtime, kmeans_inst = k3),
+            by = c("name", "stepstart_dtime")) %>%
+  full_join(hmm %>% select(name, stepstart_dtime, hmm = hmm3, hmm3_prob),
+            by = c("name", "stepstart_dtime"))
+
+# number of rows after joining
+nrow(eagle_states)
+
+# drop rows that are missing a state from any of the methods
+eagle_states <- eagle_states %>%
+  drop_na(kmeans_inst, kmeans_agg, kmeans_comb, hmm)
+
+# number of rows that were classified by all four methods
+nrow(eagle_states)
+
+```
+
+## Label the states
+
+The cluster (k-means) and state (HMM) numbers are arbitrary, so state 1 in one method isn't necessarily state 1 in another. Here we assign the same behaviour labels that were given to the 3-state models in each of the classification scripts.
+
+Note that these need to match the labels in the classification scripts - if the models are re-run and the numbers change, update them here as well.
+
+```{r}
+
+# the names of the state columns, and labels to use in the plots
+state_cols <- c("kmeans_inst", "kmeans_agg", "kmeans_comb", "hmm")
+
+method_labels <- c(kmeans_inst = "K-means instantaneous",
+                   kmeans_agg = "K-means aggregated",
+                   kmeans_comb = "K-means combined",
+                   hmm = "HMM instantaneous")
+
+# colours that are used in all of the plots and the map
+state_colours <- c(ascending = "#E69F00", flapping = "#56B4E9", gliding = "#009E73")
+
+# the consensus state can also be 'no majority' (when fewer than 3 methods agree)
+# consensus_colours <- c(state_colours, "no majority" = "#999999")
+consensus_colours <- c(state_colours, "no majority" = "red")
+
+agreement_colours <- c("all 4 agree" = "#0072B2",
+                       "3 of 4 agree" = "#F0E442",
+                       "no majority" = "#D55E00")
+
+# the labels from each classification script
+eagle_states <- eagle_states %>%
+  mutate(
+    
+    kmeans_inst = case_when(kmeans_inst == 1 ~ "ascending",
+                            kmeans_inst == 2 ~ "gliding",
+                            kmeans_inst == 3 ~ "flapping"),
+    
+    kmeans_agg = case_when(kmeans_agg == 1 ~ "flapping",
+                           kmeans_agg == 2 ~ "gliding",
+                           kmeans_agg == 3 ~ "ascending"),
+    
+    kmeans_comb = case_when(kmeans_comb == 1 ~ "gliding",
+                            kmeans_comb == 2 ~ "flapping",
+                            kmeans_comb == 3 ~ "ascending"),
+    
+    hmm = case_when(hmm == 1 ~ "gliding",
+                    hmm == 2 ~ "flapping",
+                    hmm == 3 ~ "ascending")
+    
+    ) %>%
+  # use the same factor levels for every method (so the colours are consistent)
+  mutate(across(all_of(state_cols), \(x) factor(x, levels = names(state_colours))))
+
+```
+
+## Calculate the agreement between the methods
+
+For each fix we count how many of the four methods classified it as each state. From this we get:
+
+- `n_agree` - the number of methods that agree on the most common state (2, 3 or 4)
+- `agreement` - whether all 4 methods agree, 3 of the 4 agree, or there is no majority (a 2-2 or 2-1-1 split)
+- `consensus` - the state that at least 3 of the 4 methods agree on (otherwise 'no majority')
+- `odd_one_out` - when 3 of the 4 methods agree, the method that disagrees
+
+```{r}
+
+eagle_states <- eagle_states %>%
+  mutate(
+    # the number of methods that classified each fix as each state
+    n_ascending = rowSums(across(all_of(state_cols), \(x) x == "ascending")),
+    n_flapping = rowSums(across(all_of(state_cols), \(x) x == "flapping")),
+    n_gliding = rowSums(across(all_of(state_cols), \(x) x == "gliding")),
+
+    # the number of methods that agree on the most common state
+    n_agree = pmax(n_ascending, n_flapping, n_gliding),
+
+    agreement = case_when(n_agree == 4 ~ "all 4 agree",
+                          n_agree == 3 ~ "3 of 4 agree",
+                          n_agree == 2 ~ "no majority"),
+
+    # the state that at least 3 of the 4 methods agree on
+    consensus = case_when(n_ascending >= 3 ~ "ascending",
+                          n_flapping >= 3 ~ "flapping",
+                          n_gliding >= 3 ~ "gliding",
+                          TRUE ~ "no majority"),
+
+    # when 3 of the 4 methods agree, which method disagrees?
+    odd_one_out = case_when(n_agree != 3 ~ NA,
+                            kmeans_inst != consensus ~ method_labels["kmeans_inst"],
+                            kmeans_agg != consensus ~ method_labels["kmeans_agg"],
+                            kmeans_comb != consensus ~ method_labels["kmeans_comb"],
+                            hmm != consensus ~ method_labels["hmm"])
+    ) %>%
+  # set the order of the levels for plotting
+  mutate(agreement = factor(agreement, levels = names(agreement_colours)),
+         consensus = factor(consensus, levels = names(consensus_colours)),
+         odd_one_out = factor(odd_one_out, levels = method_labels))
+
+```
+
+# Agreement through a flight segment
+
+Choose a flight segment to explore, and look at the states from each method through time, along with the flight variables. The segment is chosen to be the one closest to *n* fixes, but you can change it to any other flight segment by changing `flight_n_explore` below.
+
+```{r}
+
+flight_length <- 1500 # in number of locations
+
+# choose a flight segment - here the one closest to n locations
+# (replace flight_n_explore with any other flight_n to explore a different flight)
+flight_counts <- eagle_states %>% count(flight_n)
+flight_n_explore <- flight_counts$flight_n[which.min(abs(flight_counts$n - flight_length))]
+
+segment_explore <- eagle_states %>%
+  filter(flight_n == flight_n_explore) %>%
+  arrange(stepend_dtime) %>%
+  # number the fixes in the segment
+  mutate(fix = row_number())
+
+```
+
+The states from each method through a single flight segment, with the consensus state at the bottom. We use the same flight segment as in the classification scripts (the one closest to 1500 fixes), and the same segment is shown in the map below.
+
+The whole segment is too dense to see clearly, so we only plot a window of 300 fixes (change `fix_window` to look at a different part of the segment).
+
+```{r}
+#| fig-width: 10
+#| fig-height: 3.5
+
+# the first and last fix to plot
+fix_window <- c(1, 300)
+
+segment_explore %>%
+  filter(fix >= fix_window[1], fix <= fix_window[2]) %>%
+  select(fix, all_of(state_cols), consensus) %>%
+  # one row for each fix and method (as characters, as the factor levels differ)
+  pivot_longer(-fix, names_to = "method", values_to = "state",
+               values_transform = as.character) %>%
+  mutate(method = factor(c(method_labels, consensus = "Consensus")[method],
+                         levels = c(method_labels, "Consensus")),
+         state = factor(state, levels = names(consensus_colours))) %>%
+  ggplot(aes(x = fix, y = method, fill = state)) +
+  geom_tile() +
+  scale_fill_manual(values = consensus_colours) +
+  # put the first method at the top
+  scale_y_discrete(limits = rev) +
+  scale_x_continuous(expand = c(0, 0)) +
+  labs(x = "Fix number in the flight segment", y = NULL, fill = "State") +
+  theme_bw()
+
+```
+
+# Data explorer with states and agreement
+
+The same data explorer as in the classification scripts, coloured by the agreement between methods, the consensus state, the states from each of the 3-state models, the probability of the most likely HMM state, and some of the flight variables. Use the 'Colour by' dropdown to switch between them, and hover over a fix to see all of the values.
+
+```{r}
+
+# the agreement and state variables, then the flight variables.
+# The first variable is the one shown when the map loads
+explore_vars <- c("agreement", "consensus", state_cols, "hmm3_prob",
+                  "F_AOG", "F_Sn", "F_Vrate", "F_radians_abs")
+
+# variables with negative and positive values get a diverging palette centred on 0
+diverging_vars <- c("F_Vrate")
+
+# colours for the categorical variables (the same as in the plots above)
+map_colours <- list(agreement = agreement_colours,
+                    consensus = consensus_colours,
+                    kmeans_inst = state_colours,
+                    kmeans_agg = state_colours,
+                    kmeans_comb = state_colours,
+                    hmm = state_colours)
+
+# the same function as in the classification scripts, with one addition - the
+# 'colours' argument, which sets the colours of categorical variables
+flight_explorer <- function(segment, vars, diverging = character(0), colours = list(), height = 650) {
+
+  segment <- segment %>% arrange(stepend_dtime)
+  n_fix <- nrow(segment)
+
+  # hover labels - timestamp and the (unclipped) value of every variable
+  label_rows <- map(vars, \(v) {
+    val <- segment[[v]]
+    val <- if (is.numeric(val)) as.character(round(val, 3)) else as.character(val)
+    paste0("<tr><td>", v, "</td>",
+           "<td style='text-align:right; padding-left:10px;'><b>", val, "</b></td></tr>")
+  })
+  labels <- paste0("<b>", format(segment$stepend_dtime, "%Y-%m-%d %H:%M:%S"), "</b>",
+                   " (fix ", seq_len(n_fix), " of ", n_fix, ")",
+                   "<table>", reduce(label_rows, paste0), "</table>") %>%
+    map(htmltools::HTML)
+
+  # colour palette for each variable
+  make_palette <- function(x, v) {
+    if (!is.numeric(x)) {
+      okabe_ito <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442",
+                     "#0072B2", "#D55E00", "#CC79A7", "#999999")
+      # keep the levels of factors (so states missing from this segment don't shift the colours)
+      if (!is.factor(x)) x <- factor(x)
+      # use the colours given for this variable, otherwise the Okabe-Ito palette
+      cols <- if (v %in% names(colours)) colours[[v]][levels(x)] else okabe_ito[seq_along(levels(x))]
+      pal <- colorFactor(cols, domain = NULL, levels = levels(x))
+      return(list(pal = pal, x = x))
+    }
+    lims <- quantile(x, c(0.01, 0.99), na.rm = TRUE, names = FALSE)
+    if (v %in% diverging) {
+      lims <- c(-1, 1) * max(abs(lims))
+      pal <- colorNumeric("RdBu", domain = lims, reverse = TRUE)
+    } else {
+      pal <- colorNumeric("viridis", domain = lims)
+    }
+    list(pal = pal, x = pmin(pmax(x, lims[1]), lims[2])) # clip to the colour range
+  }
+
+  palettes <- map(set_names(vars), \(v) make_palette(segment[[v]], v))
+  # the point colours for each variable (switched in the browser by the dropdown)
+  point_colours <- map(palettes, \(p) p$pal(p$x))
+
+  # a single layer of points (so the hover labels aren't duplicated for every variable)
+  m <- leaflet(segment, height = height, width = "100%",
+               options = leafletOptions(preferCanvas = TRUE)) %>%
+    addProviderTiles(providers$Esri.WorldImagery) %>%
+    addPolylines(lng = ~lon, lat = ~lat, color = "white", weight = 1,
+                 opacity = 0.6, group = "Flight path") %>%
+    addCircleMarkers(lng = ~lon, lat = ~lat, radius = 4, stroke = FALSE,
+                     fillColor = point_colours[[1]], fillOpacity = 0.9,
+                     layerId = paste0("fix", seq_len(n_fix)), label = labels,
+                     labelOptions = labelOptions(textsize = "12px", direction = "auto"))
+
+  # one legend per variable - only the selected one is shown
+  for (v in vars) {
+    m <- m %>%
+      addLegend(position = "bottomright", pal = palettes[[v]]$pal, values = palettes[[v]]$x,
+                title = v, opacity = 1, className = paste0("info legend legend-var legend-", v))
+  }
+
+  m %>%
+    addLayersControl(overlayGroups = "Flight path",
+                     options = layersControlOptions(collapsed = FALSE)) %>%
+    addScaleBar(position = "bottomleft") %>%
+    # add a 'Colour by' dropdown that recolours the points and switches the legend
+    htmlwidgets::onRender("
+      function(el, x, data) {
+        var map = this;
+        function colourBy(v) {
+          var cols = data.cols[v];
+          for (var i = 1; i <= data.n; i++) {
+            var m = map.layerManager.getLayer('marker', 'fix' + i);
+            if (m) m.setStyle({fillColor: cols[i - 1]});
+          }
+          el.querySelectorAll('.legend-var').forEach(function(l) {
+            l.style.display = l.classList.contains('legend-' + v) ? '' : 'none';
+          });
+        }
+        // leaflet only draws the layers once the map is visible (e.g. inside
+        // a tab), so wait until the points exist before adding the dropdown
+        function setup() {
+          if (!map.layerManager || !map.layerManager.getLayer('marker', 'fix1')) {
+            setTimeout(setup, 200);
+            return;
+          }
+          addDropdown();
+        }
+        setup();
+        function addDropdown() {
+          var ctrl = L.control({position: 'topright'});
+          ctrl.onAdd = function() {
+            var div = L.DomUtil.create('div', 'info legend');
+            div.innerHTML = '<b>Colour by</b><br><select style=\"margin-top:4px;\">' +
+              data.vars.map(function(v) {
+                return '<option value=\"' + v + '\">' + v + '</option>';
+              }).join('') + '</select>';
+            div.querySelector('select').addEventListener('change', function() {
+              colourBy(this.value);
+            });
+            L.DomEvent.disableClickPropagation(div);
+            L.DomEvent.disableScrollPropagation(div);
+            return div;
+          };
+          ctrl.addTo(map);
+          colourBy(data.vars[0]);
+        }
+      }", data = list(vars = vars, cols = point_colours, n = n_fix))
+}
+
+flight_explorer(segment_explore, explore_vars, diverging = diverging_vars, colours = map_colours)
+
+```
+
+# Quantifying energy harvesting
+
+## Pull out just the ascending state (soaring)
+
+We keep only the fixes that at least 3 of the 4 methods classified as ascending, and then split them into separate soaring bouts.
+
+For each soaring fix we calculate the gap between the end of the previous soaring step and the start of this one, which is the time that the eagle spent doing something else (gliding, flapping, or a fix with no majority). Consecutive soaring steps have a gap of 0 seconds. A new bout starts when:
+
+- the gap is longer than `max_gap_s` (60 seconds), or
+- (optional, currently commented out) the soaring fix is in a different flight segment to the previous one. Flight segments are separated by gaps in the data of at least ~30 seconds (where the eagle may have landed), so this stops a bout continuing across them even when the gap is less than 60 seconds. Uncomment the `flight_n != lag(flight_n)` line to add this condition.
+
+Short interruptions (e.g. a few fixes of gliding between thermals, or a misclassified fix) therefore stay within the same bout.
+
+Bouts that are shorter than `min_bout_s` (60 seconds) are removed in the next section, as these are often only a few fixes (sometimes just one) and are more likely to be brief climbs or misclassifications than thermal or slope soaring.
+
+```{r}
+
+soaring_locations <- eagle_states %>% filter(consensus == "ascending")
+
+# the longest gap (in seconds) between soaring fixes within the same bout
+max_gap_s <- 60
+
+# the shortest bout (in seconds) to keep - shorter bouts are removed below
+min_bout_s <- 60
+
+# split soaring into bouts if there are gaps more than max_gap_s seconds
+soaring_locations <- soaring_locations %>%
+  # put the fixes in time order for each eagle
+  arrange(name, stepstart_dtime) %>%
+  group_by(name) %>%
+  mutate(
+    # time (s) between the end of the previous soaring step and the start of this one
+    gap_s = as.numeric(difftime(stepstart_dtime, lag(stepend_dtime), units = "secs")),
+    # TRUE when this fix starts a new bout - the first soaring fix of each eagle
+    # (where gap_s is NA), after a long gap, or in a new flight segment
+    new_bout = is.na(gap_s) |
+      gap_s > max_gap_s, # |
+      # flight_n != lag(flight_n),
+    # number the bouts for each eagle (cumsum counts up by 1 at every new bout)
+    bout_n = cumsum(new_bout)
+  ) %>%
+  ungroup() %>%
+  # a unique id for each bout (in case there are multiple eagles)
+  mutate(bout_id = paste(name, bout_n, sep = "_"))
+
+# number of soaring fixes and soaring bouts
+nrow(soaring_locations)
+n_distinct(soaring_locations$bout_id)
+
+```
+
+## Summarise each soaring bout
+
+For each bout we calculate:
+
+- `duration_s` - the time from the start of the first soaring step to the end of the last soaring step (including any short gaps)
+- `soaring_s` - the time spent soaring (the sum of the soaring step durations, so excluding the gaps)
+- `alt_gain_m` - the altitude gained while soaring (vertical rate × step duration, summed over the soaring steps)
+- `mean_Vrate` - the mean vertical rate (m/s) of the soaring fixes
+
+We then remove the bouts with a `duration_s` shorter than `min_bout_s`, and the soaring fixes from those bouts, so that everything below only uses the bouts that are at least 60 seconds long.
+
+```{r}
+
+soaring_bouts <- soaring_locations %>%
+  # duration of each step (s)
+  mutate(step_s = as.numeric(difftime(stepend_dtime, stepstart_dtime, units = "secs"))) %>%
+  # (bout_n before bout_id, so the bouts stay in time order)
+  group_by(name, bout_n, bout_id) %>%
+  summarise(
+    flight_n = first(flight_n),
+    start = min(stepstart_dtime),
+    end = max(stepend_dtime),
+    n_fixes = n(),
+    duration_s = as.numeric(difftime(end, start, units = "secs")),
+    soaring_s = sum(step_s),
+    alt_gain_m = sum(F_Vrate * step_s),
+    mean_Vrate = mean(F_Vrate),
+    # the centre of the bout (in UTM for ggplot and lat/lon for leaflet)
+    utme = mean(stepend_utme),
+    utmn = mean(stepend_utmn),
+    lat = mean(lat),
+    lon = mean(lon),
+    .groups = "drop"
+  )
+
+# number of bouts before removing the short ones
+nrow(soaring_bouts)
+
+# remove the bouts that are shorter than min_bout_s
+soaring_bouts <- soaring_bouts %>% filter(duration_s >= min_bout_s)
+
+# and remove the soaring fixes that were in those short bouts
+soaring_locations <- soaring_locations %>% filter(bout_id %in% soaring_bouts$bout_id)
+
+# number of bouts and soaring fixes that are left
+nrow(soaring_bouts)
+nrow(soaring_locations)
+
+soaring_bouts
+
+```
+
+## Diagnostic plots
+
+The distributions of the bout durations and the altitude gained in each bout.
+
+```{r}
+
+# distribution of the bout durations
+soaring_bouts %>%
+  ggplot() +
+  geom_histogram(aes(x = duration_s / 60), bins = 100) +
+  labs(x = "Soaring bout duration (minutes)", y = "Number of bouts") +
+  theme_bw()
+
+# distribution of the altitude gained in each bout
+soaring_bouts %>%
+  ggplot() +
+  geom_histogram(aes(x = alt_gain_m), bins = 100) +
+  labs(x = "Altitude gained in the soaring bout (m)", y = "Number of bouts") +
+  theme_bw()
+
+```
+
+## Time spent soaring
+
+The total time spent soaring (in bouts of at least `min_bout_s`), compared to the total flight time (the sum of the step durations of all of the fixes that were classified by all four methods).
+
+```{r}
+
+# total flight time and soaring time (hours) for each eagle
+eagle_states %>%
+  mutate(step_s = as.numeric(difftime(stepend_dtime, stepstart_dtime, units = "secs"))) %>%
+  group_by(name) %>%
+  summarise(flight_h = sum(step_s) / 3600) %>%
+  left_join(soaring_bouts %>%
+              group_by(name) %>%
+              summarise(n_bouts = n(),
+                        soaring_h = sum(soaring_s) / 3600),
+            by = "name") %>%
+  mutate(prop_soaring = soaring_h / flight_h)
+
+```
+
+# Soaring through time
+
+The timestamps are in UTC, so we convert them to local Tasmanian time (which accounts for daylight saving) before getting the date and hour of the day.
+
+For each soaring fix we also calculate the altitude gained during that step (`step_alt_gain_m`), so that the altitude gained in each hour or day comes from the fixes in that hour or day (a bout that runs from 11:55 to 12:10 is split between the 11:00 and 12:00 hours). The number of bouts is counted by the time that each bout started.
+
+As well as the number of bouts and the altitude gained, we calculate the proportion of the flight time that was spent soaring. This accounts for there being more soaring bouts at times when the eagle is flying more (and when there is more tracking data).
+
+```{r}
+
+# local time zone (Tasmania)
+local_tz <- "Australia/Hobart"
+
+# add the step duration, local time, date and hour to the flight data
+eagle_states <- eagle_states %>%
+  mutate(step_s = as.numeric(difftime(stepend_dtime, stepstart_dtime, units = "secs")),
+         local_time = with_tz(stepstart_dtime, local_tz),
+         date = as_date(local_time),
+         hour = hour(local_time))
+
+# and to the soaring fixes, with the altitude gained during each step
+soaring_locations <- soaring_locations %>%
+  mutate(step_s = as.numeric(difftime(stepend_dtime, stepstart_dtime, units = "secs")),
+         step_alt_gain_m = F_Vrate * step_s,
+         local_time = with_tz(stepstart_dtime, local_tz),
+         date = as_date(local_time),
+         hour = hour(local_time))
+
+# and the start of each soaring bout
+soaring_bouts <- soaring_bouts %>%
+  mutate(start_local = with_tz(start, local_tz),
+         date = as_date(start_local),
+         hour = hour(start_local))
+
+# labels for the panels in the plots below
+time_labels <- c(n_bouts = "Number of soaring bouts",
+                 alt_gain_m = "Altitude gained while soaring (m)",
+                 prop_soaring = "Proportion of flight time spent soaring")
+
+```
+
+## Hour of the day
+
+The totals for each hour of the day, across all of the days (and eagles).
+
+```{r}
+#| fig-width: 8
+#| fig-height: 7
+
+# flight time in each hour
+soaring_hourly <- eagle_states %>%
+  group_by(hour) %>%
+  summarise(flight_h = sum(step_s) / 3600) %>%
+  # number of bouts that started in each hour
+  left_join(soaring_bouts %>% count(hour, name = "n_bouts"),
+            by = "hour") %>%
+  # altitude gained and time spent soaring in each hour
+  left_join(soaring_locations %>%
+              group_by(hour) %>%
+              summarise(alt_gain_m = sum(step_alt_gain_m),
+                        soaring_h = sum(step_s) / 3600),
+            by = "hour") %>%
+  # hours with flight but no soaring have 0 bouts and 0 altitude gained
+  mutate(across(c(n_bouts, alt_gain_m, soaring_h), \(x) replace_na(x, 0)),
+         prop_soaring = soaring_h / flight_h)
+
+soaring_hourly
+
+soaring_hourly %>%
+  pivot_longer(c(n_bouts, alt_gain_m, prop_soaring), names_to = "variable") %>%
+  mutate(variable = factor(time_labels[variable], levels = time_labels)) %>%
+  ggplot() +
+  geom_col(aes(x = hour, y = value), fill = state_colours["ascending"]) +
+  facet_wrap(~ variable, ncol = 1, scales = "free_y") +
+  scale_x_continuous(breaks = 0:23) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(x = "Hour of the day (local time)", y = NULL) +
+  theme_bw()
+
+```
+
+## Through the tracking period
+
+The daily totals through the tracking period. Days where the eagle didn't fly (or had no data) are left blank.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 7
+
+# flight time on each day
+soaring_daily <- eagle_states %>%
+  group_by(date) %>%
+  summarise(flight_h = sum(step_s) / 3600) %>%
+  # number of bouts that started on each day
+  left_join(soaring_bouts %>% count(date, name = "n_bouts"),
+            by = "date") %>%
+  # altitude gained and time spent soaring on each day
+  left_join(soaring_locations %>%
+              group_by(date) %>%
+              summarise(alt_gain_m = sum(step_alt_gain_m),
+                        soaring_h = sum(step_s) / 3600),
+            by = "date") %>%
+  # days with flight but no soaring have 0 bouts and 0 altitude gained
+  mutate(across(c(n_bouts, alt_gain_m, soaring_h), \(x) replace_na(x, 0)),
+         prop_soaring = soaring_h / flight_h)
+
+soaring_daily %>%
+  pivot_longer(c(n_bouts, alt_gain_m, prop_soaring), names_to = "variable") %>%
+  mutate(variable = factor(time_labels[variable], levels = time_labels)) %>%
+  ggplot() +
+  geom_col(aes(x = date, y = value), fill = state_colours["ascending"], width = 1) +
+  facet_wrap(~ variable, ncol = 1, scales = "free_y") +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b\n%Y") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(x = "Date", y = NULL) +
+  theme_bw()
+
+```
+
+## Hour of the day through the tracking period
+
+The altitude gained in each hour of each day, which shows how the daily pattern of soaring changes through the year (e.g. with day length). Blank cells are hours with no soaring.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+
+soaring_locations %>%
+  group_by(date, hour) %>%
+  summarise(alt_gain_m = sum(step_alt_gain_m), .groups = "drop") %>%
+  ggplot() +
+  geom_tile(aes(x = date, y = hour, fill = alt_gain_m)) +
+  scale_fill_viridis_c() +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b\n%Y") +
+  scale_y_continuous(breaks = seq(0, 23, 2)) +
+  labs(x = "Date", y = "Hour of the day (local time)", fill = "Altitude\ngained (m)") +
+  theme_bw()
+
+```
+
+# Where do the eagles soar?
+
+## Spatial layers
+
+We read in the spatial layers and crop them to the area around the soaring locations (plus a buffer), so they are quick to plot. Add any other rasters to `raster_files` to include them in the leaflet map below - the names are used as the layer names in the map.
+
+The rasters are at 30 m resolution. If the soaring locations cover a large area (e.g. when using all eagles), uncomment the `aggregate()` line to use a coarser resolution, otherwise the maps will be slow and the leaflet map may hit its size limit.
+
+```{r}
+
+# the spatial layers to crop (and add to the leaflet map)
+raster_files <- c(elevation = "mapping/HS_DEM.tif",
+                  tpi_300m = "mapping/TPI_300m.tif",
+                  slope = "mapping/HS_Slope.tif",
+                  ruggedness = "mapping/HS_Ruggedness.tif",
+                  aspect = "mapping/Aspect_degrees.tif")
+
+# the area to crop to - the extent of the soaring locations plus a buffer (m)
+buffer_m <- 2000
+
+crop_area <- ext(min(soaring_locations$stepend_utme) - buffer_m,
+                 max(soaring_locations$stepend_utme) + buffer_m,
+                 min(soaring_locations$stepend_utmn) - buffer_m,
+                 max(soaring_locations$stepend_utmn) + buffer_m) %>%
+  # the eagle locations are in GDA94 / MGA zone 55
+  vect(crs = "EPSG:28355")
+
+# read in and crop each raster (the crop area is projected to the crs of each
+# raster, in case some are in a different crs)
+spatial_layers <- map(raster_files, \(f) {
+  r <- rast(f)
+  r <- crop(r, project(crop_area, crs(r)))
+  # r <- aggregate(r, fact = 5) # 5 x 5 cells, i.e. 150 m resolution
+  r
+})
+
+spatial_layers
+
+```
+
+## Static maps
+
+Maps of the soaring locations, the altitude gained in hexagonal cells, and the centres of each soaring bout. Elevation contours are shown in grey (every `contour_m` metres).
+
+::: {.panel-tabset}
+
+### Soaring locations
+
+All of the soaring fixes that are in bouts of at least `min_bout_s`.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+# elevation contour interval (m)
+contour_m <- 10
+
+ggplot() +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "black", linewidth = 0.2) +
+  geom_point(data = soaring_locations,
+             aes(x = stepend_utme, y = stepend_utmn),
+             colour = state_colours["ascending"], size = 0.1, alpha = 0.1) +
+  labs(x = NULL, y = NULL) +
+  theme_bw()
+
+```
+
+### Altitude gained (hexagons)
+
+The total altitude gained while soaring in each hexagonal cell, summed over all of the soaring fixes in that cell. The width of the cells is set by `hex_width_m`.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+# width of the hexagonal cells (m)
+hex_width_m <- 250
+
+ggplot() +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "grey70", linewidth = 0.2) +
+  stat_summary_hex(data = soaring_locations,
+                   aes(x = stepend_utme, y = stepend_utmn, z = step_alt_gain_m),
+                   fun = sum, binwidth = hex_width_m, alpha = 0.9) +
+  scale_fill_viridis_c(option = "magma") +
+  labs(x = NULL, y = NULL, fill = "Altitude\ngained (m)") +
+  theme_bw()
+
+```
+
+### Bout centres
+
+The centre of each soaring bout, coloured by the altitude gained in that bout (the bouts with the most altitude gained are plotted on top).
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+ggplot() +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "grey70", linewidth = 0.2) +
+  geom_point(data = soaring_bouts %>% arrange(alt_gain_m),
+             aes(x = utme, y = utmn, colour = alt_gain_m),
+             size = 1, alpha = 0.8) +
+  scale_colour_viridis_c() +
+  labs(x = NULL, y = NULL, colour = "Altitude\ngained (m)") +
+  theme_bw()
+
+```
+
+:::
+
+## Interactive map
+
+The centre of each soaring bout over a satellite (or topographic) basemap, coloured by the altitude gained in that bout. Hover over a bout to see its details. The spatial layers are added as overlays that can be switched on in the layer control (top right) - they are hidden when the map loads.
+
+```{r}
+
+# colour palette for the altitude gained in each bout
+bout_palette <- colorNumeric("viridis", domain = soaring_bouts$alt_gain_m)
+
+# hover labels for each bout
+bout_labels <- paste0("<b>", soaring_bouts$bout_id, "</b><br>",
+                      format(soaring_bouts$start_local, "%Y-%m-%d %H:%M"), "<br>",
+                      "Duration: ", round(soaring_bouts$duration_s / 60, 1), " min<br>",
+                      "Altitude gained: ", round(soaring_bouts$alt_gain_m), " m<br>",
+                      "Mean vertical rate: ", round(soaring_bouts$mean_Vrate, 2), " m/s") %>%
+  map(htmltools::HTML)
+
+# basemaps
+soaring_map <- leaflet(soaring_bouts, height = 650, width = "100%",
+                       options = leafletOptions(preferCanvas = TRUE)) %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  addProviderTiles(providers$OpenTopoMap, group = "Topographic")
+
+# add each spatial layer (in greyscale, so the bouts stand out), with its own legend
+for (layer in names(spatial_layers)) {
+
+  r <- spatial_layers[[layer]]
+  layer_palette <- colorNumeric("Greys", domain = range(values(r), na.rm = TRUE),
+                                na.color = "transparent", reverse = TRUE)
+
+  soaring_map <- soaring_map %>%
+    addRasterImage(r, colors = layer_palette, opacity = 0.8, group = layer) %>%
+    addLegend(position = "bottomleft", pal = layer_palette,
+              values = range(values(r), na.rm = TRUE), title = layer, group = layer)
+}
+
+soaring_map %>%
+  addCircleMarkers(lng = ~lon, lat = ~lat, radius = 4, stroke = FALSE,
+                   fillColor = ~bout_palette(alt_gain_m), fillOpacity = 0.9,
+                   label = bout_labels, group = "Soaring bouts") %>%
+  addLegend(position = "bottomright", pal = bout_palette, values = ~alt_gain_m,
+            title = "Altitude gained (m)", group = "Soaring bouts") %>%
+  addLayersControl(baseGroups = c("Satellite", "Topographic"),
+                   overlayGroups = c(names(spatial_layers), "Soaring bouts"),
+                   options = layersControlOptions(collapsed = FALSE)) %>%
+  # hide the spatial layers when the map loads
+  hideGroup(names(spatial_layers)) %>%
+  addScaleBar(position = "bottomleft")
+
+```
+
+## Prevalence of soaring
+
+There are multiple different ways that we could associate climbing behaviour with landscape variables to predict where wedge-tailed eagles are harvesting environmental energy.
+
+- Presence of soaring (positive vertical rate) in that cell
+- Occurrence of soaring (presence of uplifts) and flapping flight (absence of uplifts) (as per @Scacco2019-si)
+- Proportion of time spent soaring in that cell, compared to the total proportion of time spent in that cell
+- Average positive vertical rate (of the soaring behaviour only)
+- Maximum positive vertical rate (of the soaring behaviour only)
+
+```{r}
+
+
+
+```
+
+# References
+
+::: {#refs}
+:::
+
+# Session Information
+
+```{r}
+
+utils::sessionInfo()
+
+```

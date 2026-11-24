@@ -1,0 +1,1750 @@
+---
+title: "Wedge-tailed eagle behavioural classification"
+subtitle: "Hidden Markov Model (HMM)"
+author: 
+  - name: "Scott Forrest"
+    url: https://swforrest.github.io/
+    orcid: 0000-0001-9529-0108
+    affiliation: University of Tasmania, QUT
+    email: "scottwforrest@gmail.com"
+  - name: "James Pay"
+    affiliation: University of Tasmania
+date: "`r Sys.Date()`"
+execute:
+  cache: false
+  warning: false
+bibliography: references.bib
+toc: true
+number-sections: false
+format: 
+  html:
+    # self-contained: true    
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    df-print: paged
+    code-line-numbers: true
+    code-overflow: scroll
+    fig-format: png
+    fig-dpi: 150
+editor:
+  source
+editor_options: 
+  chunk_output_type: inline
+abstract: |
+  Using hidden Markov models to estimate behavioural states from high-frequency 3D GPS-tracking data. Here we use the same variables (rate of ascent/descent, speed, and absolute turn angles) as the `kmean_instantaneous.qmd` script to classify the behavioural states of wedge-tailed eagles. Also using the aggregated variables (average of speed and vertical rate, and cumulative turning angles, for local windows) would break an assumption of the HMM, as an HMM assumes its data streams are independent given the state.
+---
+
+# Load packages
+
+```{r}
+
+library(tidyverse)
+packages <- c("psych", "cluster", "leaflet", "hmmTMB")
+walk(packages, require, character.only = T)
+
+```
+
+# Import data
+
+```{r}
+
+load(file = "data/eagledata4.Rdata")
+unique(eagledata4$age)
+
+eagledata4 <- eagledata4 %>% ungroup()
+
+head(eagledata4, 10)
+
+```
+
+## How many locations does each individual have?
+
+```{r}
+
+eagledata4 %>% 
+  group_by(name) %>%
+  summarize(n = n(),
+            Mindate = format(min(date), "%Y-%m-%d"),
+            Maxdate = format(max(date), "%Y-%m-%d"),
+            Mindatetime = min(stepend_dtime),
+            Maxdatetime = max(stepend_dtime))
+
+```
+
+# Select a subset of the data for prototyping
+
+To reduce the dataset while testing models, we'll use a single eagle's data - Stella.
+
+```{r}
+
+# to use all data
+# which_data <- "all"
+
+# to pick a single eagle's data
+which_data <- "Stella"
+
+if(which_data == "all") {
+  # keep all data
+  eagle_data <- eagledata4
+  } else {
+    # filter to the single eagle
+    eagle_data <- eagledata4 %>% filter(name == which_data)
+  }
+
+```
+
+### Flight information
+
+How many flight segments, and how many locations in each?
+
+```{r}
+
+# check number of unique segments
+length(unique(eagle_data$flight_n)) 
+
+# how many locations in each flight segment?
+segment_lengths <- eagle_data %>% 
+  group_by(flight_n) %>% 
+  summarize(len = n())
+
+segment_lengths %>% 
+  ggplot() +
+  geom_histogram(aes(x = len), bins = 100) +
+  labs(title = "Number of locations per flight segment",
+       x = "Number of locations per flight segment",
+       y = "Count") +
+  theme_bw()
+
+segment_lengths %>% 
+  ggplot() +
+  geom_histogram(aes(x = len), bins = 100) +
+  scale_x_log10() +
+  labs(title = "Number of locations per flight segment (log)",
+       x = "Number of locations per flight segment",
+       y = "Count") +
+  theme_bw()
+
+```
+
+## Create features for clustering
+
+```{r}
+
+eagle_data <- eagle_data %>% rename(F_Vrate_abs = F_absVrate)
+
+eagle_data <- eagle_data %>% 
+  mutate(
+    F_radians = step_ta,                  # step_ta was already in radians
+    F_radians_abs = abs(F_radians),       # make radian absolute value
+    F_AOG = ifelse(F_AOG < 0 ,0, F_AOG),  # make all negative AOG values 0
+    .after = F_Vrate_abs
+   )
+
+head(eagle_data, 10)
+
+```
+
+### Filter the vertical rates by removing extreme (and unrealistic) values
+
+```{r}
+
+eagle_data <- eagle_data %>% 
+  filter(F_Vrate < quantile(F_Vrate, 0.9995) & 
+           F_Vrate > quantile(F_Vrate, 0.0005))  
+
+```
+
+### Drop rows with very low speeds
+
+```{r}
+
+eagle_data <- eagle_data %>% filter(F_Sn >= 1)
+
+```
+
+
+## Create aggregated features
+
+For each location (the focal fix) we summarise the flight variables over a centred moving window that extends `half_window_s` seconds before and after it, within the same flight segment. As the data are classified after the fact, a centred window avoids shifting the detected transitions later in time (as a backward-only window would). Windows are based on time rather than a number of fixes, as the fix-intervals vary (mostly 3–5 s).
+
+Within each window we calculate:
+
+* `turn_cum` - the cumulative **signed** turning angle (radians). When thermalling the turns all have the same sign, so the sum grows steadily (roughly 2π per circle), whereas the GPS jitter of a perched or slow bird has a random sign and largely cancels out.
+* `speed_mean` - the mean ground speed (m/s, from `F_Sn`).
+* `Vrate_mean` - the mean **signed** vertical rate (m/s, from `F_Vrate`), i.e. the net climb or descent.
+* `straightness` - the net displacement across the window divided by the path length (0 = returning to the start, 1 = perfectly straight). This separates directional flight from circling, and complements `turn_cum` for perched/slow birds (low straightness but little net turning).
+* `n_fixes` - the number of fixes in the window. This is not for clustering, but shows where windows are truncated at the start and end of flight segments (or across gaps in the data).
+
+The turning angle is taken from `step_ta`, which is in radians. The turning angle of the first fix of each flight segment is relative to a step outside that segment, so it is set to 0.
+
+The windows are calculated after removing the extreme vertical rates (so they don't contaminate the window means), but before the low-speed rows are dropped below. Where fixes are missing, straightness uses the straight line between the remaining fixes. Each column gets a `_window` suffix with the half-width (e.g. `F_turn_cum_window`).
+
+```{r}
+
+# half-width of the window in seconds (the window covers this many seconds
+# before AND after the focal fix)
+half_window_s <- 15
+
+# sum of x across each window, using cumulative sums (fast on millions of rows).
+# lo and hi are the indices of the first and last fixes in each window
+window_sum <- function(x, lo, hi) {
+  cs <- c(0, cumsum(x))
+  cs[hi + 1] - cs[lo]
+}
+
+# also get the standard deviation within the window
+window_sd <- function(x, lo, hi) {
+  n   <- hi - lo + 1
+  cs  <- c(0, cumsum(x))
+  cs2 <- c(0, cumsum(x^2))
+
+  s  <- cs[hi + 1]  - cs[lo]    # sum of x in window
+  s2 <- cs2[hi + 1] - cs2[lo]   # sum of x^2 in window
+
+  v <- (s2 - s^2 / n) / (n - 1)
+  sqrt(pmax(v, 0))              # guard against tiny negative values from rounding
+}
+
+# run the function across the data
+add_window_features <- function(data, half_window_s) {
+
+  data %>%
+    arrange(name, flight_n, stepend_dtime) %>%
+    group_by(name, flight_n) %>%
+    mutate(
+      t = as.numeric(stepend_dtime),
+      # first and last fixes within +/- half_window_s of each focal fix
+      lo = findInterval(t - half_window_s, t, left.open = TRUE) + 1,
+      hi = findInterval(t + half_window_s, t),
+      n_fixes = hi - lo + 1,
+      # turning angle (radians), ignoring the turn at the start of each flight segment
+      ta = if_else(row_number() == 1, 0, step_ta),
+      turn_cum = window_sum(ta, lo, hi),
+      speed_mean = window_sum(F_Sn, lo, hi) / n_fixes,
+      speed_sd = window_sd(F_Sn, lo, hi),
+      Vrate_mean = window_sum(F_Vrate, lo, hi) / n_fixes,
+      Vrate_sd = window_sd(F_Vrate, lo, hi),
+      # net displacement / path length, both from the positions of the fixes in the
+      # window (so it stays <= 1 even when fixes have been filtered out). seg is the
+      # distance from the previous fix, so the path in a window is the sum of
+      # seg over fixes lo+1 to hi
+      seg = c(0, sqrt(diff(stepend_utme)^2 + diff(stepend_utmn)^2)),
+      path_length = window_sum(seg, lo, hi) - seg[lo],
+      displacement = sqrt((stepend_utme[hi] - stepend_utme[lo])^2 +
+                            (stepend_utmn[hi] - stepend_utmn[lo])^2),
+      straightness = if_else(path_length > 0, displacement / path_length, 0),
+      .after = F_radians_abs
+    ) %>%
+    ungroup() %>%
+    select(-c(t, lo, hi, ta, seg)) %>% #, path_length, displacement
+    rename_with(\(x) paste0("F_", x, "_window"),
+                c(turn_cum, speed_mean, speed_sd, Vrate_mean, Vrate_sd, 
+                  path_length, displacement, straightness)) %>%
+    rename_with(\(x) paste0(x, "_window"), n_fixes)
+
+}
+
+eagle_data <- add_window_features(eagle_data, half_window_s)
+
+# window feature names, used for plotting below
+window_vars <- paste0(c("F_turn_cum", "F_speed_mean", "F_speed_sd", "F_Vrate_mean", "F_Vrate_sd", "F_straightness"),
+                      "_window")
+
+eagle_data %>%
+  select(stepend_dtime, flight_n, F_Sn, F_Vrate, step_ta,
+         all_of(window_vars), paste0("n_fixes_window")) %>%
+  head(20)
+
+```
+
+### Plot the aggregated features
+
+```{r}
+#| results: asis
+
+cat("::: {.panel-tabset}\n\n")
+
+for(variable in c(window_vars, paste0("n_fixes_window"))) {
+
+  p <- ggplot(data = eagle_data) +
+    geom_histogram(aes(x = .data[[variable]]),
+                   bins = 100, fill = "skyblue", colour = "black") +
+    ggtitle(variable) +
+    theme_bw()
+
+  cat("\n\n#### ", variable, "\n\n")
+  print(p)
+
+}
+
+cat("\n\n:::\n")
+
+```
+
+## Transform variables
+
+```{r}
+
+eagle_data <- eagle_data %>% 
+  mutate(
+    # take the square root of skewed (positive) variables
+    F_AOG_sqrt = sqrt(F_AOG), 
+    F_Sn_sqrt = sqrt(F_Sn), 
+    F_Vrate_abs_sqrt = sqrt(F_Vrate_abs), 
+    F_radians_abs_sqrt = sqrt(F_radians_abs), 
+    F_speed_sqrt = sqrt(F_speed),
+    F_turn_cum_window_abs = abs(F_turn_cum_window),
+    F_turn_cum_window_abs_sqrt = sqrt(F_turn_cum_window_abs),
+    F_speed_sd_window_sqrt = sqrt(F_speed_sd_window),
+    F_Vrate_sd_window_sqrt = sqrt(F_Vrate_sd_window),
+    .after= F_turn_cum_window
+    )
+
+```
+
+## All possible flight variables
+
+```{r}
+#| results: asis
+
+variable_names <- eagle_data %>% select(F_AOG:F_straightness_window) %>% names()
+
+cat("::: {.panel-tabset}\n\n")
+
+for(i in 1:length(variable_names)) {
+  
+  variable <- variable_names[[i]]
+  
+  p <- ggplot(data = eagle_data) + 
+    geom_histogram(aes(x = .data[[variable]]),
+                   bins = 100, fill = "skyblue", colour = "black") +
+    ggtitle(variable) +
+    theme_bw()
+  
+  # one tab per model: heading first, then the plot
+  cat("\n\n#### ", variable, "\n\n")
+  print(p)
+  
+}
+
+cat("\n\n:::\n")
+
+```
+
+# Data explorer
+
+We want to visually assess the flight paths with respect to the flight variables.
+
+A single flight segment is plotted over a satellite basemap. Hover over a location to see the values of all flight variables at that fix, and use the *Colour by* dropdown (top right) to colour the locations by each variable (the white flight path line can be toggled off). The aim is to see which variables clearly separate the visually identifiable states, such as thermalling (tight circles with positive vertical rate) and flapping/directional flight (straight lines).
+
+The colour scales are clipped to the 1st–99th percentiles of each variable so that a few extreme values don't wash out the colours (the hover values are unclipped). Variables that take both negative and positive values (`F_Vrate` and `F_radians`) use a diverging palette centred on 0 (red = positive, blue = negative).
+
+```{r}
+
+# the variables plotted in the previous chunks
+explore_vars <- c("F_AOG", "F_radians", "F_speed", "F_Sn", "F_Vrate", "F_Vrate_abs", "F_radians_abs",
+                  window_vars, "F_turn_cum_window_abs", "F_speed_sd_window_sqrt", "F_Vrate_sd_window_sqrt")
+
+# variables with negative and positive values get a diverging palette centred on 0
+diverging_vars <- c("F_radians", "F_Vrate",
+                    paste0(c("F_turn_cum", "F_Vrate_mean"), "_window"))
+
+# written as a function so it can be re-used later, e.g. with the HMM
+# behaviour labels: flight_explorer(segment_to_plot, c("behavior", explore_vars))
+flight_explorer <- function(segment, vars, diverging = character(0), height = 650) {
+
+  segment <- segment %>% arrange(stepend_dtime)
+  n_fix <- nrow(segment)
+
+  # hover labels - timestamp and the (unclipped) value of every variable
+  label_rows <- map(vars, \(v) {
+    val <- segment[[v]]
+    val <- if (is.numeric(val)) as.character(round(val, 3)) else as.character(val)
+    paste0("<tr><td>", v, "</td>",
+           "<td style='text-align:right; padding-left:10px;'><b>", val, "</b></td></tr>")
+  })
+  labels <- paste0("<b>", format(segment$stepend_dtime, "%Y-%m-%d %H:%M:%S"), "</b>",
+                   " (fix ", seq_len(n_fix), " of ", n_fix, ")",
+                   "<table>", reduce(label_rows, paste0), "</table>") %>%
+    map(htmltools::HTML)
+
+  # colour palette for each variable
+  make_palette <- function(x, v) {
+    if (!is.numeric(x)) {
+      okabe_ito <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442",
+                     "#0072B2", "#D55E00", "#CC79A7", "#999999")
+      x <- factor(x)
+      pal <- colorFactor(okabe_ito[seq_along(levels(x))], domain = x)
+      return(list(pal = pal, x = x))
+    }
+    lims <- quantile(x, c(0.01, 0.99), na.rm = TRUE, names = FALSE)
+    if (v %in% diverging) {
+      lims <- c(-1, 1) * max(abs(lims))
+      pal <- colorNumeric("RdBu", domain = lims, reverse = TRUE)
+    } else {
+      pal <- colorNumeric("viridis", domain = lims)
+    }
+    list(pal = pal, x = pmin(pmax(x, lims[1]), lims[2])) # clip to the colour range
+  }
+
+  palettes <- map(set_names(vars), \(v) make_palette(segment[[v]], v))
+  # the point colours for each variable (switched in the browser by the dropdown)
+  point_colours <- map(palettes, \(p) p$pal(p$x))
+
+  # a single layer of points (so the hover labels aren't duplicated for every variable)
+  m <- leaflet(segment, height = height, width = "100%",
+               options = leafletOptions(preferCanvas = TRUE)) %>%
+    addProviderTiles(providers$Esri.WorldImagery) %>%
+    addPolylines(lng = ~lon, lat = ~lat, color = "white", weight = 1,
+                 opacity = 0.6, group = "Flight path") %>%
+    addCircleMarkers(lng = ~lon, lat = ~lat, radius = 4, stroke = FALSE,
+                     fillColor = point_colours[[1]], fillOpacity = 0.9,
+                     layerId = paste0("fix", seq_len(n_fix)), label = labels,
+                     labelOptions = labelOptions(textsize = "12px", direction = "auto"))
+
+  # one legend per variable - only the selected one is shown
+  for (v in vars) {
+    m <- m %>%
+      addLegend(position = "bottomright", pal = palettes[[v]]$pal, values = palettes[[v]]$x,
+                title = v, opacity = 1, className = paste0("info legend legend-var legend-", v))
+  }
+
+  m %>%
+    addLayersControl(overlayGroups = "Flight path",
+                     options = layersControlOptions(collapsed = FALSE)) %>%
+    addScaleBar(position = "bottomleft") %>%
+    # add a 'Colour by' dropdown that recolours the points and switches the legend
+    htmlwidgets::onRender("
+      function(el, x, data) {
+        var map = this;
+        function colourBy(v) {
+          var cols = data.cols[v];
+          for (var i = 1; i <= data.n; i++) {
+            var m = map.layerManager.getLayer('marker', 'fix' + i);
+            if (m) m.setStyle({fillColor: cols[i - 1]});
+          }
+          el.querySelectorAll('.legend-var').forEach(function(l) {
+            l.style.display = l.classList.contains('legend-' + v) ? '' : 'none';
+          });
+        }
+        // leaflet only draws the layers once the map is visible (e.g. inside
+        // a tab), so wait until the points exist before adding the dropdown
+        function setup() {
+          if (!map.layerManager || !map.layerManager.getLayer('marker', 'fix1')) {
+            setTimeout(setup, 200);
+            return;
+          }
+          addDropdown();
+        }
+        setup();
+        function addDropdown() {
+          var ctrl = L.control({position: 'topright'});
+          ctrl.onAdd = function() {
+            var div = L.DomUtil.create('div', 'info legend');
+            div.innerHTML = '<b>Colour by</b><br><select style=\"margin-top:4px;\">' +
+              data.vars.map(function(v) {
+                return '<option value=\"' + v + '\">' + v + '</option>';
+              }).join('') + '</select>';
+            div.querySelector('select').addEventListener('change', function() {
+              colourBy(this.value);
+            });
+            L.DomEvent.disableClickPropagation(div);
+            L.DomEvent.disableScrollPropagation(div);
+            return div;
+          };
+          ctrl.addTo(map);
+          colourBy(data.vars[0]);
+        }
+      }", data = list(vars = vars, cols = point_colours, n = n_fix))
+}
+
+# choose a flight segment - here the one closest to n locations
+# (replace flight_n_explore with any other flight_n to explore a different flight)
+flight_counts <- eagle_data %>% count(flight_n)
+flight_n_explore <- flight_counts$flight_n[which.min(abs(flight_counts$n - 1500))]
+
+segment_explore <- eagle_data %>% filter(flight_n == flight_n_explore)
+
+flight_explorer(segment_explore, explore_vars, diverging = diverging_vars)
+
+```
+
+# Select the classification variables 
+
+We will pull out the same variables used in @Bergen2022-rj, and scale them to have mean = 0 and sd = 1.
+
+```{r}
+
+clustering_variables <- c(
+  # "F_AOG_sqrt",
+    "F_radians_abs",
+    "F_Sn",
+    # "F_speed_sqrt",
+    "F_Vrate"
+    # "F_Vrate_abs"
+    # "F_turn_cum_window_abs_sqrt",
+    # "F_speed_mean_window",
+    # "F_speed_sd_window_sqrt",
+    # "F_Vrate_mean_window",
+    # "F_Vrate_sd_window_sqrt",
+    # "F_straightness_window"
+)
+
+eagle_data <- eagle_data %>%
+  drop_na(clustering_variables) 
+
+ready_to_cluster <- eagle_data %>%
+  select(clustering_variables) #%>%
+  # scale()
+
+suppressWarnings(
+  multi.hist(ready_to_cluster, global = FALSE, breaks=60,density=FALSE)
+)
+
+```
+
+## Plot the correlation between the covariates
+
+```{r}
+
+ready_to_cluster %>% 
+  as.data.frame() %>% 
+  cor() %>% 
+  corrplot::corrplot(method = "number", type = "upper", tl.col = "black")
+
+```
+
+# Hidden Markov Modelling
+
+Hidden Markov models (HMMs) assume that the flight variables at each fix are generated by one of $N$ unobserved ('hidden') behavioural states, and that the sequence of states follows a Markov chain, so the state at one fix depends on the state at the previous fix [@Zucchini2017-ql; @McClintock2020-jc]. Unlike k-means, an HMM therefore uses the order of the fixes. Each state is described by a probability distribution for each variable (rather than a single cluster centre), and the model also estimates the probabilities of switching between states.
+
+We fit the models with the `hmmTMB` package, which estimates the parameters by maximum likelihood using Template Model Builder. It can also include covariates on the transition probabilities or state-dependent distributions and random effects, which we may want later.
+
+Here we fit 'vanilla' HMMs with 2, 3 and 4 states using the three instantaneous variables selected above. 'Vanilla' means that, given the states, the observations are independent of each other through time and the three variables are independent of each other within a state. The autocorrelation plots of the pseudo-residuals below show how reasonable the first assumption is. If there is a lot of remaining autocorrelation, an autoregressive HMM would be the next step [@Lawler2019-au].
+
+## State-dependent distributions
+
+Each variable needs a distribution that matches its range and shape (see the histograms above):
+
+| Variable | Description | Range | Distribution in `hmmTMB` |
+|---------------|------------------|----------------|-----------------------|
+| `F_radians_abs` | Absolute turning angle (radians) | 0 to $\pi$ | Beta (`"beta"`), on `F_radians_abs / pi` |
+| `F_Sn` | Speed (step length / time, m/s) | \> 0, right-skewed | Gamma (`"gamma2"`), with mean and sd parameters |
+| `F_Vrate` | Vertical rate (m/s) | Negative and positive | Normal (`"norm"`) |
+
+Turning angles are usually modelled with a circular distribution (e.g. von Mises or wrapped Cauchy). Here we use the absolute turning angle because the eagles circle in both directions. It lies between 0 (straight ahead) and $\pi$ (a complete reversal), so we divide it by $\pi$ to put it on the 0–1 scale and use a beta distribution. The beta distribution is flexible: it can have most of its values close to 0 (straight flight), or be spread across the range (circling).
+
+For speed we use the `gamma2` distribution, which is a gamma distribution parameterised by its mean and standard deviation (rather than shape and rate). This makes the initial values easier to choose.
+
+The gaps in the vertical rate histogram are likely because altitude is recorded to the nearest metre and divided by fix intervals of 3–5 s, so only some values are possible. The normal distribution is an approximation, but should be adequate for separating climbing, level and descending flight.
+
+Other assumptions to keep in mind:
+
+-   Each flight segment (`flight_n`) is a separate time series, so the model doesn't link the end of one flight to the start of the next.
+-   HMMs assume a regular time interval between observations. Most fix intervals are 4 s (with some 3 s and 5 s), and some rows were removed above (extreme vertical rates and speeds \< 1 m/s), leaving small gaps. As speed and vertical rate are both per second, we treat the fixes as regular here.
+
+## Prepare the data
+
+```{r}
+
+# hmmTMB treats each level of an 'ID' column as a separate time series, and the
+# rows of each ID must be together and in time order. We sort eagle_data itself
+# (rather than just the copy for hmmTMB), so that the decoded states can be
+# added straight back onto it in the same row order
+eagle_data <- eagle_data %>%
+  arrange(name, flight_n, stepend_dtime) %>%
+  # drop flights with only a single fix. There are no transitions to learn from,
+  # and hmmTMB's state decoding fails for a time series with one observation
+  group_by(name, flight_n) %>%
+  filter(n() > 1) %>%
+  ungroup()
+
+# update ready_to_cluster so that it still lines up with eagle_data (it's used
+# for the PCA below)
+ready_to_cluster <- eagle_data %>% select(all_of(clustering_variables))
+
+hmm_data <- eagle_data %>%
+  mutate(
+    # one time series per flight segment. The eagle's name is included so that the
+    # IDs stay unique when using all eagles. fct_inorder() keeps the factor levels in
+    # the same order as the rows, which some hmmTMB functions (e.g. state_probs())
+    # rely on - alphabetical levels would mismatch them
+    ID = fct_inorder(paste(name, flight_n, sep = "_")),
+    # absolute turning angle as a proportion of pi (0 = straight ahead, 1 = a
+    # complete reversal)
+    F_turn_prop = F_radians_abs / pi,
+    # the beta distribution doesn't include exactly 0 or 1, so nudge any values
+    # at the boundaries slightly inside
+    F_turn_prop = pmin(pmax(F_turn_prop, 1e-6), 1 - 1e-6)
+  ) %>%
+  # the turning angle at the first fix of each flight is relative to a step
+  # outside the flight, so set it to NA. hmmTMB allows missing values - that fix
+  # is still used, but only through its speed and vertical rate
+  group_by(ID) %>%
+  mutate(F_turn_prop = if_else(row_number() == 1, NA, F_turn_prop)) %>%
+  ungroup() %>%
+  # keep only the columns that we need, as a plain data frame
+  select(ID, F_turn_prop, F_Sn, F_Vrate) %>%
+  as.data.frame()
+
+head(hmm_data, 10)
+
+# number of fixes and flights
+nrow(hmm_data)
+nlevels(hmm_data$ID)
+
+```
+
+## Model set-up
+
+```{r}
+
+# the distribution for each variable (names must match the columns of hmm_data)
+dists <- list(
+  F_turn_prop = "beta",  # absolute turning angle / pi
+  F_Sn = "gamma2",       # speed (m/s) - gamma distribution with a mean and sd
+  F_Vrate = "norm"       # vertical rate (m/s)
+)
+
+# The beta distribution's parameters (shape1 and shape2) aren't intuitive, so this
+# helper converts a mean and sd of the absolute turning angle in radians into the
+# shape parameters (on the 0-1 scale). It only works when sd < sqrt(mean * (pi - mean))
+beta_shapes <- function(mean, sd) {
+  m <- mean / pi  # mean on the 0-1 scale
+  s <- sd / pi    # sd on the 0-1 scale
+  nu <- m * (1 - m) / s^2 - 1
+  list(shape1 = m * nu,
+       shape2 = (1 - m) * nu)
+}
+
+# e.g. a state with a mean absolute turning angle of 0.25 radians (sd = 0.25)
+beta_shapes(mean = 0.25, sd = 0.25)
+
+```
+
+### Initial values
+
+The parameters are estimated by numerical optimisation, which starts from initial values for every parameter. Poor initial values can cause the optimiser to get stuck at a local maximum of the likelihood, or fail to converge [@Glennie2023-qh]. We choose initial values that reflect the behaviours we expect, informed by the histograms and the k-means clusters. They also set the order of the states (state 1, state 2, etc). They are only starting points, and the model estimates the final values.
+
+The initial values below were checked by refitting the models from random starting values (see [Check for local maxima](#check-for-local-maxima)). For three and four states, the values were also adjusted to be close to the estimated values, to keep the state order consistent across the models (e.g. the circling state is always the last state). The state names in the comments are only hypotheses - check the estimated distributions and the flight paths before naming the states.
+
+The models take a few minutes each to fit with Stella's data (\~500,000 fixes).
+
+### 2 states
+
+```{r}
+
+# initial values, with one value per state (state 1, state 2)
+# state 1: straight, fast and descending (e.g. gliding and directional flight)
+# state 2: turning, slower and climbing (e.g. thermal soaring)
+par0_2 <- list(
+  F_turn_prop = beta_shapes(mean = c(0.25, 1),  # radians
+                            sd   = c(0.25, 0.8)),
+  F_Sn = list(mean = c(13, 9),                  # m/s
+              sd   = c(3.5, 4)),
+  F_Vrate = list(mean = c(-1, 0.7),             # m/s
+                 sd   = c(1.5, 1))
+)
+
+# the hidden state process (a Markov chain). initial_state = "shared" estimates a
+# single initial state distribution for all flights. The default ("estimated")
+# estimates a separate one for every flight, which adds thousands of parameters
+# and makes the model very slow to fit
+hid2 <- MarkovChain$new(data = hmm_data, n_states = 2, initial_state = "shared")
+
+# the observation process (the state-dependent distributions)
+obs2 <- Observation$new(data = hmm_data, dists = dists, n_states = 2, par = par0_2)
+
+# combine them into a hidden Markov model and estimate the parameters
+hmm2 <- HMM$new(obs = obs2, hid = hid2)
+hmm2$fit(silent = TRUE)
+
+# check that the optimiser converged (0 = converged)
+hmm2$out()$convergence
+
+```
+
+### 3 states
+
+```{r}
+
+# initial values, with one value per state (state 1, state 2, state 3)
+# state 1: straight, fast and descending (e.g. gliding)
+# state 2: fairly straight, slow and level (e.g. slow directional flight or flapping)
+# state 3: turning and climbing (e.g. thermal soaring)
+par0_3 <- list(
+  F_turn_prop = beta_shapes(mean = c(0.25, 0.35, 1.3),  # radians
+                            sd   = c(0.25, 0.3, 0.8)),
+  F_Sn = list(mean = c(14, 8, 9),                       # m/s
+              sd   = c(3, 2, 4)),
+  F_Vrate = list(mean = c(-1.3, -0.2, 0.8),             # m/s
+                 sd   = c(1.5, 1.3, 1))
+)
+
+hid3 <- MarkovChain$new(data = hmm_data, n_states = 3, initial_state = "shared")
+obs3 <- Observation$new(data = hmm_data, dists = dists, n_states = 3, par = par0_3)
+hmm3 <- HMM$new(obs = obs3, hid = hid3)
+hmm3$fit(silent = TRUE)
+
+hmm3$out()$convergence
+
+```
+
+### 4 states
+
+```{r}
+
+# initial values, with one value per state (state 1, ..., state 4)
+# state 1: straight, fast and descending (e.g. fast gliding)
+# state 2: straight, medium speed and slightly descending (e.g. directional flight)
+# state 3: fairly straight, slow and level (e.g. slow flight or flapping)
+# state 4: turning and climbing (e.g. thermal soaring)
+par0_4 <- list(
+  F_turn_prop = beta_shapes(mean = c(0.25, 0.25, 0.45, 1.35),  # radians
+                            sd   = c(0.25, 0.25, 0.35, 0.8)),
+  F_Sn = list(mean = c(16, 10.5, 6.5, 9.5),                    # m/s
+              sd   = c(3, 2, 2, 4)),
+  F_Vrate = list(mean = c(-1.4, -0.8, 0.2, 0.8),               # m/s
+                 sd   = c(1.7, 1.3, 1.2, 1))
+)
+
+hid4 <- MarkovChain$new(data = hmm_data, n_states = 4, initial_state = "shared")
+obs4 <- Observation$new(data = hmm_data, dists = dists, n_states = 4, par = par0_4)
+hmm4 <- HMM$new(obs = obs4, hid = hid4)
+hmm4$fit(silent = TRUE)
+
+hmm4$out()$convergence
+
+```
+
+## Check for local maxima
+
+The optimiser can converge to a local maximum rather than the global maximum, which becomes more likely with more states. A simple check is to refit a model from several random starting values and compare the log-likelihoods. If none of the random starts reach a higher log-likelihood than our model, we can be more confident that it is the global maximum. The states may come out in a different order from random starts, but the log-likelihood is the same when the solution is the same.
+
+This chunk is not run when rendering (`eval: false`) as it refits the model several times, but it can be run interactively. Change `n_states` to check the other models.
+
+```{r}
+#| eval: false
+
+n_states <- 3   # the model to check
+n_tries <- 5    # the number of random starting values
+
+llk_tries <- rep(NA, n_tries)
+
+set.seed(1)
+
+for(i in 1:n_tries) {
+
+  # random initial values for each state, within plausible ranges
+  turn_means <- runif(n_states, 0.1, 2)  # radians
+  par0_random <- list(
+    F_turn_prop = beta_shapes(mean = turn_means, sd = 0.6 * turn_means),
+    F_Sn = list(mean = runif(n_states, 5, 16),
+                sd = runif(n_states, 2, 4)),
+    F_Vrate = list(mean = runif(n_states, -2.5, 1.5),
+                   sd = runif(n_states, 0.8, 1.5))
+  )
+
+  hid_try <- MarkovChain$new(data = hmm_data, n_states = n_states, initial_state = "shared")
+  obs_try <- Observation$new(data = hmm_data, dists = dists, n_states = n_states, par = par0_random)
+  hmm_try <- HMM$new(obs = obs_try, hid = hid_try)
+  hmm_try$fit(silent = TRUE)
+
+  llk_tries[i] <- hmm_try$llk()
+
+}
+
+# log-likelihoods from the random starts, compared to the model fitted above
+llk_tries
+list(hmm2, hmm3, hmm4)[[n_states - 1]]$llk()
+
+```
+
+## Estimated parameters
+
+The estimated parameters of the state-dependent distributions for each variable (`F_turn_prop` are the beta shape parameters), and the transition probability matrix (rows are the current state, and columns are the state at the next fix). The stationary distribution is the long-run proportion of time spent in each state.
+
+::: panel-tabset
+### 2 states
+
+```{r}
+
+hmm2$print_obspar()
+hmm2$print_tpm()
+
+# stationary distribution
+hmm2$predict(what = "delta")
+
+```
+
+### 3 states
+
+```{r}
+
+hmm3$print_obspar()
+hmm3$print_tpm()
+
+# stationary distribution
+hmm3$predict(what = "delta")
+
+```
+
+### 4 states
+
+```{r}
+
+hmm4$print_obspar()
+hmm4$print_tpm()
+
+# stationary distribution
+hmm4$predict(what = "delta")
+
+```
+:::
+
+## Model comparison
+
+AIC and BIC (lower is better) always favour more states when there is this much data, as extra states also soak up structure that the model doesn't include (such as autocorrelation or differences between flights), rather than finding distinct behaviours [@Pohle2017-rb]. The number of states should therefore be chosen mainly on whether the states are biologically interpretable, and on the model checks below.
+
+```{r}
+
+# hmmTMB has an AIC_marginal() function, but with initial_state = "shared" it
+# counts the initial state distribution as if it were estimated separately for
+# every flight. We therefore calculate AIC and BIC directly, using the number of
+# parameters that the optimiser actually estimated
+hmm_models <- list("2 states" = hmm2,
+                   "3 states" = hmm3,
+                   "4 states" = hmm4)
+
+model_comparison <- tibble(
+  model = names(hmm_models),
+  log_lik = map_dbl(hmm_models, \(m) m$llk()),
+  n_par = map_dbl(hmm_models, \(m) length(m$out()$par))
+) %>%
+  mutate(
+    AIC = -2 * log_lik + 2 * n_par,
+    BIC = -2 * log_lik + log(nrow(hmm_data)) * n_par,
+    delta_AIC = AIC - min(AIC),
+    delta_BIC = BIC - min(BIC)
+  )
+
+model_comparison
+
+```
+
+## State-dependent distributions
+
+The estimated distribution of each variable in each state, over a histogram of the data. Each state's distribution is weighted by the proportion of fixes assigned to that state, so they add up to the total (black line). The turning angle is on the 0–1 scale (multiply by $\pi$ for radians).
+
+```{r}
+#| results: asis
+
+cat("::: {.panel-tabset}\n\n")
+
+for(model_name in names(hmm_models)) {
+
+  # one tab per model: heading first, then the plots
+  cat("\n\n### ", model_name, "\n\n")
+
+  for(variable in names(dists)) {
+
+    p <- hmm_models[[model_name]]$plot_dist(variable) +
+      ggtitle(paste(model_name, "-", variable)) +
+      theme_bw()
+
+    print(p)
+
+  }
+}
+
+cat("\n\n:::\n")
+
+```
+
+## Pseudo-residuals
+
+Pseudo-residuals are the HMM equivalent of residuals. If the model fits well, they follow a standard normal distribution [@Zucchini2017-ql]. The Q-Q plots show how well the state-dependent distributions match the shape of the data. The autocorrelation function (ACF) plots show whether there is correlation through time that the model doesn't account for - strong autocorrelation would suggest moving to an autoregressive HMM.
+
+```{r}
+
+# calculate the pseudo-residuals for each model (this takes a minute or two per
+# model). Each element of the list has the residuals of each variable
+pseudo_res <- map(hmm_models, \(m) m$pseudores())
+
+```
+
+```{r}
+#| results: asis
+
+cat("::: {.panel-tabset}\n\n")
+
+for(model_name in names(pseudo_res)) {
+
+  cat("\n\n### ", model_name, "\n\n")
+
+  # Q-Q plots on the top row, and ACF plots on the bottom row
+  par(mfrow = c(2, 3))
+
+  for(variable in names(dists)) {
+    res <- pseudo_res[[model_name]][[variable]]
+    res[!is.finite(res)] <- NA # NA for the first turning angles (and any Inf values)
+    qqnorm(res, main = paste("Q-Q:", variable), pch = ".")
+    qqline(res, col = "red")
+  }
+
+  for(variable in names(dists)) {
+    res <- pseudo_res[[model_name]][[variable]]
+    res[!is.finite(res)] <- NA
+    acf(res, lag.max = 20, na.action = na.pass, main = paste("ACF:", variable))
+  }
+
+}
+
+cat("\n\n:::\n")
+
+```
+
+## Assign the state labels to the data
+
+The most likely sequence of states for each flight is found with the Viterbi algorithm (`viterbi()`). We also save the probability of the most likely state at each fix (from `state_probs()`), which shows how certain the classification is (values close to 1 are certain, and values close to 1/number of states are uncertain).
+
+```{r}
+
+# hmm_data was created from eagle_data without changing the order of the rows,
+# so the decoded states line up with the rows of eagle_data
+eagle_data$hmm2 <- hmm2$viterbi()
+eagle_data$hmm3 <- hmm3$viterbi()
+eagle_data$hmm4 <- hmm4$viterbi()
+
+# state_probs() gives the probability of each state at each fix (one column per
+# state). We keep the highest probability at each fix
+eagle_data$hmm2_prob <- apply(hmm2$state_probs(), 1, max)
+eagle_data$hmm3_prob <- apply(hmm3$state_probs(), 1, max)
+eagle_data$hmm4_prob <- apply(hmm4$state_probs(), 1, max)
+
+```
+
+## Write the data to CSV
+
+```{r}
+
+write_csv(eagle_data, paste0("outputs/eagle_states_hmm_", which_data, ".csv"))
+
+```
+
+
+## Summarise the decoded states
+
+The proportion of fixes in each state, and the mean and standard deviation of each variable in each state, which helps to give the states behavioural names.
+
+```{r}
+
+eagle_data %>%
+  select(hmm2, hmm3, hmm4, all_of(clustering_variables)) %>%
+  pivot_longer(c(hmm2, hmm3, hmm4), names_to = "model", values_to = "state") %>%
+  group_by(model, state) %>%
+  summarise(
+    n = n(),
+    across(all_of(clustering_variables),
+           list(mean = mean, sd = sd)),
+    .groups = "drop_last"
+  ) %>%
+  mutate(prop = n / sum(n), .after = n) %>%
+  ungroup() %>%
+  mutate(across(where(is.double), \(x) round(x, 3)))
+
+```
+
+## PCA 
+
+```{r}
+
+##Time for a biplot lineup.
+##First step: do PCA on the flight variables
+##From there, create a lineup of biplots for each HMM, coloured by state
+# the HMMs use the unscaled variables, so we scale them here (mean = 0, sd = 1)
+# so that speed doesn't dominate the PCA (as in the k-means scripts)
+pca <- princomp(scale(ready_to_cluster))
+
+eagle_data <- eagle_data %>% 
+  mutate(pc1 = pca$scores[,1],pc2 = pca$scores[,2])
+
+```
+
+## Create a color-blind palette for plotting
+
+```{r}
+
+#Below is a color-blind palette, per 
+# https://stackoverflow.com/questions/57153428/r-plot-color-combinations-that-are-colorblind-accessible
+
+cbpal <- c("#009E73","#F0E442", "#000000", "#D55E00","#56B4E9","#999999","#CC79A7") #black instead of green; harsh yellow; red not pink
+
+```
+
+### If using all eagle's data, subset again here
+
+We subset here regardless for plotting efficiency.
+
+```{r}
+
+eagle_subset <- eagle_data %>% filter(name == which_data)
+
+```
+
+## Plot the HMM states on the PCA biplot
+
+```{r}
+#| results: asis
+
+# the columns with the decoded states of each HMM
+hmm_labs <- c("hmm2", "hmm3", "hmm4")
+
+cat("::: {.panel-tabset}\n\n")
+
+for(i in 1:length(hmm_labs)) {
+
+  hmm_lab <- hmm_labs[[i]]
+  n_states <- i + 1
+  hmm_name <- paste0(n_states, " states")
+
+  p <- ggplot(data = eagle_subset) +
+    geom_point(aes(x = pc1, y = pc2, col = factor(.data[[hmm_lab]])),shape='.') +
+    xlim(c(-5,5)) + ylim(c(-6,6)) + #Just to zoom in on the biplot a bit
+    guides(color='none') +
+    xlab('PC1') + ylab('PC2')+
+    ggtitle(hmm_name) +
+    scale_color_manual(values = cbpal[seq_len(n_states)]) +
+    geom_segment(data = as.data.frame(pca$loadings[,1:2]), aes(x = 0, xend = 6* Comp.1, y = 0, yend = 6*Comp.2),
+                            arrow = arrow(length = unit(0.025, "npc"), type = "open"),
+                            lwd = 1) +
+    geom_text(data = as.data.frame(pca$loadings[,1:2]), aes(x = Comp.1*6.5, y =  Comp.2*6.5,
+                            label = rownames(pca$loadings)))  +
+    theme_bw()
+  
+  # one tab per model: heading first, then the plot
+  cat("\n\n#### ", hmm_name, "\n\n")
+  print(p)
+  
+}
+
+cat("\n\n:::\n")
+
+```
+
+## PCA Loadings
+
+::: {.panel-tabset}
+
+## PC1
+
+```{r}
+
+# PC1 loadings
+pca.dat = as.data.frame(pca$loadings[,1:2])
+pca.dat$variable = rownames(pca.dat)
+ggplot(pca.dat, aes(x=variable, y=Comp.1)) + 
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept=0, linetype='dashed', col = 'red', size = 2) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+```
+
+## PC2
+
+```{r}
+
+# PC2 loadings
+ggplot(pca.dat, aes(x=variable, y=Comp.2)) + 
+  geom_bar(stat = "identity") +
+  geom_hline(yintercept=0, linetype='dashed', col = 'red', size = 2) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+```
+
+:::
+
+# Assessing states
+
+## Relationships of the flight variables
+
+### 3-state HMM
+
+We have tried to remove perching fixes beforehand (but some still may remain), so we use the 3-state HMM to identify the other three behaviours in @Bergen2022-rj (ascending, flapping, gliding).
+
+The order of the HMM states is set by the initial values, so state 1 is the straight, fast and descending state (gliding), state 2 is the fairly straight, slow and level state (flapping), and state 3 is the turning and climbing state (ascending). Check these names against the [summary of the decoded states](#summarise-the-decoded-states) and the plots below, particularly if the initial values or the data change.
+
+```{r}
+
+state_1 <- "gliding"
+state_2 <- "flapping"
+state_3 <- "ascending"
+# state_4 <- "..."
+
+eagle_subset <- eagle_subset %>%
+  mutate(behavior = case_when(
+                              hmm3==1~state_1,
+                              hmm3==2~state_2,
+                              hmm3==3~state_3)
+         ) %>%
+  # reorder the levels
+  mutate(behavior = factor(behavior, levels = c("ascending", "flapping", "gliding")))
+
+```
+
+::: {.panel-tabset}
+
+## Altitude above ground
+
+We remove outliers for clarity and faster plotting.
+
+```{r}
+
+ggplot(data = eagle_subset) + 
+  geom_boxplot(aes(x = behavior, fill = behavior, y = F_AOG), outlier.shape = NA) + 
+  scale_fill_manual(values = cbpal[c(1,2,4,5)]) + 
+  ylim(0, 1000) +
+  labs(x = "Behavior", y = "Altitude above ground (m)") +
+  theme_bw()
+
+```
+
+## Absolute turn angle
+
+```{r}
+
+# it looks like Silas didn't actually use Radians. He used absolute turn angle (create this column and plot)
+eagle_subset$abs_angle = abs(eagle_subset$step_ta)
+
+ggplot(data = eagle_subset) + 
+  geom_boxplot(aes(x = behavior, fill = behavior, y = abs_angle), outlier.shape = NA) + 
+  scale_fill_manual(values =cbpal[c(1,2,4,5)]) +
+  labs(x = "Behavior", y = "Absolute turn angle (radians)") +
+  theme_bw()
+
+```
+
+## Speed over ground
+
+```{r}
+
+ggplot(data = eagle_subset) + 
+  geom_boxplot(aes(x = behavior, fill = behavior, y = F_Sn), outlier.shape = NA) + 
+  scale_fill_manual(values = cbpal[c(1,2,4,5)]) + 
+  ylim(0, 25) +
+  labs(x = "Behavior", y = "Speed (m/s)") +
+  theme_bw()
+
+```
+
+## Vertical rate
+
+```{r}
+
+ggplot(data = eagle_subset) + 
+  geom_boxplot(aes(x = behavior, fill = behavior, y = F_Vrate), outlier.shape = NA) + 
+  scale_fill_manual(values = cbpal[c(1,2,4,5)]) + ylim(c(-5,5)) + 
+  geom_hline(aes(yintercept=0), linetype=2) +
+  labs(x = "Behavior", y = "Vertical rate (m/s)") +
+  theme_bw()
+
+```
+
+:::
+
+# Plotting flight paths
+
+Find a relatively long one, but not so long that it's hard to see the colors.
+
+```{r}
+
+flight_lengths <- eagle_subset %>% 
+  group_by(flight_n) %>% 
+  summarize(len = n()) %>% 
+  arrange(-len) 
+
+# find the closest to n locations
+flight_n_plot <- flight_lengths$flight_n[which.min(abs(flight_lengths$len - 1500))]
+
+segment_to_plot <- eagle_subset %>% 
+  filter(flight_n==flight_n_plot)
+
+```
+
+## 2D plot (x-y)
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = stepend_utme, y = stepend_utmn)) +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+## Through time plots (x-time)
+
+::: {.panel-tabset}
+
+## Altitude
+
+```{r}
+
+# calculate the time in seconds from the first point in the segment
+segment_to_plot$seconds = segment_to_plot$stepend_dtime - segment_to_plot[[1,6]]
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_AOG)) +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+## Speed
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_Sn)) +
+  geom_line(aes(x=seconds,y=F_Sn), color = "grey") +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+## Average speed
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_speed_mean_window)) +
+  geom_line(aes(x=seconds,y=F_speed_mean_window), color = "grey") +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+## Speed SD
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_speed_sd_window)) +
+  geom_line(aes(x=seconds,y=F_speed_sd_window), color = "grey") +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+## Vertical rate
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_Vrate)) +
+  geom_hline(aes(yintercept=0), linetype="dashed") +
+  geom_line(aes(x=seconds,y=F_Vrate), color = "grey") +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+## Average vertical rate
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_Vrate_mean_window)) +
+  geom_hline(aes(yintercept=0), linetype="dashed") +
+  geom_line(aes(x=seconds,y=F_Vrate_mean_window), color = "grey") +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+## Vertical rate SD
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_Vrate_sd_window)) +
+  geom_hline(aes(yintercept=0), linetype="dashed") +
+  geom_line(aes(x=seconds,y=F_Vrate_sd_window), color = "grey") +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+## Turning angles
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_radians)) +
+  geom_hline(aes(yintercept=0), linetype="dashed") +
+  geom_line(aes(x=seconds,y=F_radians), color = "grey") +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+## Cumulative turning angles
+
+```{r}
+
+ggplot(data = segment_to_plot,aes(x = seconds, y = F_turn_cum_window)) +
+  geom_hline(aes(yintercept=0), linetype="dashed") +
+  geom_line(aes(x=seconds,y=F_turn_cum_window), color = "grey") +
+  geom_point(aes(col = as.factor(behavior)),size=.5) + 
+  scale_color_manual(values = cbpal[c(1,2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+:::
+
+# Data explorer with states
+
+The same data explorer as above, but this time also coloured by the states (behaviours) decoded by the HMMs (`hmm2`, `hmm3` and `hmm4`) and by the probability of the most likely state at each fix (`hmm2_prob`, `hmm3_prob` and `hmm4_prob`). Low probabilities show where the classification is uncertain, which often happens at the transitions between behaviours.
+
+```{r}
+
+# the HMM states and their probabilities, then the variables plotted in the
+# previous chunks. The first variable is the one shown when the map loads
+explore_vars <- c("hmm3", "hmm3_prob", "hmm2", "hmm2_prob", "hmm4", "hmm4_prob",
+                  "F_AOG", "F_radians", "F_speed", "F_Sn", "F_Vrate", "F_Vrate_abs", "F_radians_abs",
+                  window_vars, "F_turn_cum_window_abs")
+
+# variables with negative and positive values get a diverging palette centred on 0
+diverging_vars <- c("F_radians", "F_Vrate",
+                    paste0(c("F_turn_cum", "F_Vrate_mean"), "_window"))
+
+# written as a function so it can be re-used later, e.g. with the HMM
+# behaviour labels: flight_explorer(segment_to_plot, c("behavior", explore_vars))
+flight_explorer <- function(segment, vars, diverging = character(0), height = 650) {
+
+  segment <- segment %>% arrange(stepend_dtime)
+  n_fix <- nrow(segment)
+
+  # hover labels - timestamp and the (unclipped) value of every variable
+  label_rows <- map(vars, \(v) {
+    val <- segment[[v]]
+    val <- if (is.numeric(val)) as.character(round(val, 3)) else as.character(val)
+    paste0("<tr><td>", v, "</td>",
+           "<td style='text-align:right; padding-left:10px;'><b>", val, "</b></td></tr>")
+  })
+  labels <- paste0("<b>", format(segment$stepend_dtime, "%Y-%m-%d %H:%M:%S"), "</b>",
+                   " (fix ", seq_len(n_fix), " of ", n_fix, ")",
+                   "<table>", reduce(label_rows, paste0), "</table>") %>%
+    map(htmltools::HTML)
+
+  # colour palette for each variable
+  make_palette <- function(x, v) {
+    if (!is.numeric(x)) {
+      okabe_ito <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442",
+                     "#0072B2", "#D55E00", "#CC79A7", "#999999")
+      x <- factor(x)
+      pal <- colorFactor(okabe_ito[seq_along(levels(x))], domain = x)
+      return(list(pal = pal, x = x))
+    }
+    lims <- quantile(x, c(0.01, 0.99), na.rm = TRUE, names = FALSE)
+    if (v %in% diverging) {
+      lims <- c(-1, 1) * max(abs(lims))
+      pal <- colorNumeric("RdBu", domain = lims, reverse = TRUE)
+    } else {
+      pal <- colorNumeric("viridis", domain = lims)
+    }
+    list(pal = pal, x = pmin(pmax(x, lims[1]), lims[2])) # clip to the colour range
+  }
+
+  palettes <- map(set_names(vars), \(v) make_palette(segment[[v]], v))
+  # the point colours for each variable (switched in the browser by the dropdown)
+  point_colours <- map(palettes, \(p) p$pal(p$x))
+
+  # a single layer of points (so the hover labels aren't duplicated for every variable)
+  m <- leaflet(segment, height = height, width = "100%",
+               options = leafletOptions(preferCanvas = TRUE)) %>%
+    addProviderTiles(providers$Esri.WorldImagery) %>%
+    addPolylines(lng = ~lon, lat = ~lat, color = "white", weight = 1,
+                 opacity = 0.6, group = "Flight path") %>%
+    addCircleMarkers(lng = ~lon, lat = ~lat, radius = 4, stroke = FALSE,
+                     fillColor = point_colours[[1]], fillOpacity = 0.9,
+                     layerId = paste0("fix", seq_len(n_fix)), label = labels,
+                     labelOptions = labelOptions(textsize = "12px", direction = "auto"))
+
+  # one legend per variable - only the selected one is shown
+  for (v in vars) {
+    m <- m %>%
+      addLegend(position = "bottomright", pal = palettes[[v]]$pal, values = palettes[[v]]$x,
+                title = v, opacity = 1, className = paste0("info legend legend-var legend-", v))
+  }
+
+  m %>%
+    addLayersControl(overlayGroups = "Flight path",
+                     options = layersControlOptions(collapsed = FALSE)) %>%
+    addScaleBar(position = "bottomleft") %>%
+    # add a 'Colour by' dropdown that recolours the points and switches the legend
+    htmlwidgets::onRender("
+      function(el, x, data) {
+        var map = this;
+        function colourBy(v) {
+          var cols = data.cols[v];
+          for (var i = 1; i <= data.n; i++) {
+            var m = map.layerManager.getLayer('marker', 'fix' + i);
+            if (m) m.setStyle({fillColor: cols[i - 1]});
+          }
+          el.querySelectorAll('.legend-var').forEach(function(l) {
+            l.style.display = l.classList.contains('legend-' + v) ? '' : 'none';
+          });
+        }
+        // leaflet only draws the layers once the map is visible (e.g. inside
+        // a tab), so wait until the points exist before adding the dropdown
+        function setup() {
+          if (!map.layerManager || !map.layerManager.getLayer('marker', 'fix1')) {
+            setTimeout(setup, 200);
+            return;
+          }
+          addDropdown();
+        }
+        setup();
+        function addDropdown() {
+          var ctrl = L.control({position: 'topright'});
+          ctrl.onAdd = function() {
+            var div = L.DomUtil.create('div', 'info legend');
+            div.innerHTML = '<b>Colour by</b><br><select style=\"margin-top:4px;\">' +
+              data.vars.map(function(v) {
+                return '<option value=\"' + v + '\">' + v + '</option>';
+              }).join('') + '</select>';
+            div.querySelector('select').addEventListener('change', function() {
+              colourBy(this.value);
+            });
+            L.DomEvent.disableClickPropagation(div);
+            L.DomEvent.disableScrollPropagation(div);
+            return div;
+          };
+          ctrl.addTo(map);
+          colourBy(data.vars[0]);
+        }
+      }", data = list(vars = vars, cols = point_colours, n = n_fix))
+}
+
+# choose a flight segment - here the one closest to n locations
+# (replace flight_n_explore with any other flight_n to explore a different flight)
+flight_counts <- eagle_data %>% count(flight_n)
+flight_n_explore <- flight_counts$flight_n[which.min(abs(flight_counts$n - 1500))]
+
+segment_explore <- eagle_data %>%
+  filter(flight_n == flight_n_explore) %>%
+  # make the states factors, so that they get a categorical colour palette
+  mutate(across(c(hmm2, hmm3, hmm4), factor))
+
+flight_explorer(segment_explore, explore_vars, diverging = diverging_vars)
+
+```
+
+# Transition probabilities
+
+## Estimated transition probabilities
+
+The HMM estimates the probabilities of switching between the states directly (the transition probability matrix). Rows are the current behaviour and columns are the behaviour at the next fix, so each row sums to 1. Here we use the 3-state HMM with the state names from above.
+
+```{r}
+
+# estimated transition probability matrix of the 3-state HMM ([, , 1] takes the
+# matrix at the first time point - it's the same at every time point, as there
+# are no covariates on the transition probabilities)
+tpm_hmm3 <- hmm3$par()$tpm[, , 1]
+
+# label the rows (current state) and columns (next state) with the state names
+dimnames(tpm_hmm3) <- list(old = c(state_1, state_2, state_3),
+                           new = c(state_1, state_2, state_3))
+
+round(tpm_hmm3, 3)
+
+```
+
+```{r}
+
+# convert the matrix to a data frame (one row per pair of states) for plotting
+tpm_df <- as.data.frame(as.table(tpm_hmm3)) %>%
+  mutate(old = factor(old, levels = c("ascending", "flapping", "gliding")),
+         new = factor(new, levels = c("ascending", "flapping", "gliding")))
+
+ggplot(tpm_df, aes(x = new, y = old, fill = Freq)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = round(Freq, 3)), size = 4) +
+  scale_fill_gradient(low = "white", high = "steelblue", limits = c(0, 1)) +
+  scale_y_discrete(limits = rev) +   # first state at the top, like a matrix
+  labs(x = "Next behaviour", y = "Current behaviour",
+       fill = "Probability",
+       title = "Estimated transition probabilities (3-state HMM)") +
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+
+```
+
+## Transitions between the decoded states
+
+We can also count the transitions between the decoded (Viterbi) states, as for the k-means clusters. This also shows how often each behaviour is the last one in a flight segment, which the HMM doesn't model. The transitions between behaviours should be broadly similar to the estimated probabilities above.
+
+```{r}
+
+# create a data frame with the hmm3 state labels and flight_n to get transition probabilities between behaviours
+transition_data = NULL
+transition_data$hmm3 = eagle_data$hmm3
+transition_data = as.data.frame(transition_data)
+transition_data$flight_n = eagle_data$flight_n
+
+# get a unique value for each segment end
+transition_data = transition_data %>%
+  group_by(flight_n) %>%
+  mutate(segment_end = c(flight_n[-n()], paste("segment end")))
+
+# get behavioural transitions
+transition_data = transition_data %>%
+  mutate(old = case_when(
+    hmm3==1~state_1,
+    hmm3==2~state_2,
+    hmm3==3~state_3)) %>%
+  # reorder the levels
+  mutate(old = factor(old, levels = c('ascending','flapping','gliding')))
+
+# get the state at the next location
+transition_data = transition_data %>%
+  mutate(new = lead(old))
+
+# add a 'segment_end' label to the new column for the last fix in each flight segment
+transition_data$new2 = ifelse(transition_data$segment_end == "segment end",'segment end',paste(transition_data$new))
+
+# only interested in transitions to a different behaviour - so remove all rows with transitions to same behaviour
+# transition_data = transition_data[transition_data$old != transition_data$new2,]
+transMat = prop.table(with(transition_data, table(old, new2)), 1)
+as.data.frame(transMat)
+
+```
+
+### Plot the decoded transition matrix
+
+```{r}
+
+trans_df <- as.data.frame(transMat)
+
+trans_df$new2 <- factor(trans_df$new2,
+                        levels = c("ascending", "flapping", "gliding", "segment end"))
+
+ggplot(trans_df, aes(x = new2, y = old, fill = Freq)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = round(Freq, 2)), size = 4) +
+  scale_fill_gradient(low = "white", high = "steelblue", limits = c(0, 1)) +
+  scale_y_discrete(limits = rev) +   # first state at the top, like a matrix
+  labs(x = "Next behaviour", y = "Current behaviour",
+       fill = "Probability",
+       title = "Transitions between decoded states (3-state HMM)") +
+  theme_minimal() +
+  theme(panel.grid = element_blank())
+
+```
+
+# Proportion of points
+
+```{r}
+
+eagle_data <- eagle_data %>%
+  mutate(behavior = case_when(
+    hmm3==1~state_1,
+    hmm3==2~state_2,
+    hmm3==3~state_3)) %>%
+  mutate(behavior = factor(behavior, levels = c("ascending", "flapping", "gliding")))
+
+# plotdat = eagledata5[eagledata5$name == "Floki" | eagledata5$name == "Ernie" | eagledata5$name == "Maxie" ,]
+# plotdat = eagledata5
+
+```
+
+::: {.panel-tabset}
+
+## Age
+
+```{r}
+
+ggplot(eagle_data, aes(fill=behavior, x=age)) + 
+  geom_bar(position="fill") +
+  scale_fill_manual(values = cbpal[c(2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+## Time of day
+
+```{r}
+
+attr(eagle_data$date,"tzone")
+df =
+  suncalc::getSunlightTimes(
+    date = seq.Date(min(as.Date(eagle_data$date,tz = "Australia/Hobart")), max(as.Date(eagle_data$date,tz = "Australia/Hobart")), by = 1), # get sunrise values for study period
+    keep = c("sunrise", "sunriseEnd", "sunset", "sunsetStart"),
+    lat = -42.14, # for ease i've just used one coordinate to calculate sunrise/sunset (middle of  Tassie)
+    lon = 146.67,
+    tz = "Australia/Hobart"
+  )
+df = df[c(1,4,6) ]
+eagle_data$date = as.Date(eagle_data$date,tz = "Australia/Hobart")
+timeeagle_data = merge(eagle_data,df, by="date")
+rm(df)
+timeeagle_data$tsincesunrise = timeeagle_data$stepend_dtime - timeeagle_data$sunrise
+units(timeeagle_data$tsincesunrise)="hours"
+timeeagle_data$ttosunset = timeeagle_data$sunset - timeeagle_data$stepend_dtime 
+units(timeeagle_data$ttosunset)="hours"
+
+timeeagle_data$timeofday <- ifelse(timeeagle_data$tsincesunrise >= -1.5 & timeeagle_data$tsincesunrise <= 1,'dawn',
+                  ifelse(timeeagle_data$ttosunset >= -1.5 & timeeagle_data$ttosunset <= 1,'dusk',
+                  ifelse(timeeagle_data$tsincesunrise > 1 & timeeagle_data$time <= "12:00:00",'morning',
+                  ifelse(timeeagle_data$time > "12:00:00" & timeeagle_data$ttosunset > 1,'afternoon','night'))))
+timeeagle_data$timeofday = as.factor(timeeagle_data$timeofday) 
+# check to make sure worked OK
+summary.tab =
+  do.call('rbind', lapply(split(timeeagle_data, timeeagle_data$timeofday), function(X)
+    data.frame(
+      n = nrow(X),
+      Mintime = min(X$time),
+      Maxtime = max(X$time),
+      Mintsunrise = min(X$tsincesunrise),
+      Mintsunset = min(X$ttosunset),
+      Maxtsunrise = max(X$tsincesunrise),
+      Maxtsunset = max(X$ttosunset)
+    )))
+summary.tab
+timeeagle_data$timeofday <- factor(timeeagle_data$timeofday , levels = c('dawn', 'morning', 'afternoon', 'dusk'))
+# create these labels for adding total percent of data to plots
+labs = timeeagle_data %>%
+  count(timeofday) %>%
+  mutate(
+    perc = round(proportions(n) * 100, 1),
+    cyl = as.factor(timeofday)
+    )
+
+```
+
+### Plot time of day
+
+```{r}
+
+ggplot(timeeagle_data, aes(x = timeofday, fill = behavior)) + 
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = cbpal[c(2, 4, 5)]) +
+  ylab("proportion") +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+```
+
+## Months
+
+```{r}
+
+eagle_data <- eagle_data %>% 
+  mutate(
+    month = as.factor(format(date,"%B")),
+    month = factor(month, levels = c('January', 'February', 'March',
+                                     'April', 'May', 'June',
+                                     'July', 'August', 'September',
+                                     'October', 'November', 'December'))
+  )
+
+# create these labels for adding total percent of data to plots
+labs = eagle_data %>%
+  count(month) %>%
+  mutate(
+    perc = round(proportions(n) * 100, 1),
+    cyl = as.factor(month)
+    )
+
+```
+
+### Plot months
+
+```{r}
+
+ggplot(eagle_data, aes(x = month, fill = behavior)) + 
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = cbpal[c(2, 4, 5)]) +
+  ylab("proportion") +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 30, hjust = 1))
+
+```
+
+## Season
+
+```{r}
+
+## Season ##
+# Season column
+# seasonplotdat = plotdat[plotdat$name == "Floki" | plotdat$name == "Ernie" | plotdat$name == "Maxie" ,]
+
+getSeason <- function(DATES) {
+    WS <- as.Date("2012-6-21", format = "%Y-%m-%d",tz = "Australia/Hobart") # Winter Solstice
+    SE <- as.Date("2012-9-23",  format = "%Y-%m-%d",tz = "Australia/Hobart") # Spring Equinox
+    SS <- as.Date("2012-12-21",  format = "%Y-%m-%d",tz = "Australia/Hobart") # Summer Solstice
+    FE <- as.Date("2012-3-21",  format = "%Y-%m-%d",tz = "Australia/Hobart") # Fall Equinox
+    # Convert dates from any year to 2012 dates
+    d <- as.Date(strftime(DATES, format="2012-%m-%d",tz = "Australia/Hobart"))
+    ifelse (d >= WS & d < SE, "Winter",
+      ifelse (d >= SE & d < SS, "Spring",
+        ifelse (d >= SS | d < FE, "Summer", "Autumn")))
+}
+
+eagle_data$season = getSeason(eagle_data$date)
+# create these labels for adding total percent of data to plots
+labs = eagle_data %>%
+  count(season) %>%
+  mutate(
+    perc = round(proportions(n) * 100, 1),
+    cyl = as.factor(season)
+    )
+
+# plot
+ggplot(eagle_data, aes(fill=behavior, x=season)) + 
+  geom_bar(position="fill") +
+  scale_fill_manual(values = cbpal[c(2,4,5)]) +
+  theme_light() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+
+```
+
+:::
+
+# References
+
+::: {#refs}
+:::
+
+# Session Information
+
+```{r}
+
+utils::sessionInfo()
+
+```

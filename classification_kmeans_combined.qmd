@@ -489,8 +489,8 @@ clustering_variables <- c(
     "F_speed_mean_window",
     "F_speed_sd_window_sqrt",
     "F_Vrate_mean_window",
-    "F_Vrate_sd_window_sqrt",
-    "F_straightness_window"
+    "F_Vrate_sd_window_sqrt"
+    # "F_straightness_window"
 )
 
 eagle_data <- eagle_data %>%

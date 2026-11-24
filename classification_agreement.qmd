@@ -52,7 +52,7 @@ walk(packages, require, character.only = T)
 kmeans_instantaneous <- read_csv("outputs/eagle_states_kmeans_instantaneous_Stella.csv")
 kmeans_aggregated <- read_csv("outputs/eagle_states_kmeans_aggregated_Stella.csv")
 kmeans_combined <- read_csv("outputs/eagle_states_kmeans_combined_Stella.csv")
-hmm_instantaneous <- read_csv("outputs/eagle_states_hmm_Stella.csv")
+hmm <- read_csv("outputs/eagle_states_hmm_Stella.csv")
 
 ```
 
@@ -65,9 +65,9 @@ We keep the location and flight variables from the k-means instantaneous data, a
 ```{r}
 
 # number of rows in each dataframe
-tibble(data = c("kmeans_instantaneous", "kmeans_aggregated", "kmeans_combined", "hmm_instantaneous"),
+tibble(data = c("kmeans_instantaneous", "kmeans_aggregated", "kmeans_combined", "hmm"),
        rows = c(nrow(kmeans_instantaneous), nrow(kmeans_aggregated),
-                nrow(kmeans_combined), nrow(hmm_instantaneous)))
+                nrow(kmeans_combined), nrow(hmm)))
 
 eagle_states <- kmeans_combined %>%
   select(name, stepstart_dtime, stepend_dtime, 
@@ -80,7 +80,7 @@ eagle_states <- kmeans_combined %>%
             by = c("name", "stepstart_dtime")) %>%
   full_join(kmeans_instantaneous %>% select(name, stepstart_dtime, kmeans_inst = k3),
             by = c("name", "stepstart_dtime")) %>%
-  full_join(hmm_instantaneous %>% select(name, stepstart_dtime, hmm = hmm3, hmm3_prob),
+  full_join(hmm %>% select(name, stepstart_dtime, hmm = hmm3, hmm3_prob),
             by = c("name", "stepstart_dtime"))
 
 # number of rows after joining

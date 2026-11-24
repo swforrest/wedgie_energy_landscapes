@@ -13,6 +13,7 @@ execute:
 
 website:
   title: "Wedge-tailed eagle modelling"
+  favicon: icons/wedgie_silhouette.svg
   description: "Modelling the behaviours and energy ladnscape of wedge-tailed eagles in Tasmania"
   site-url: https://swforrest.github.io/wedgie_modelling/
   repo-url: https://github.com/swforrest/wedgie_modelling

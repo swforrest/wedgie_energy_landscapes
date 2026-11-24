@@ -35,6 +35,8 @@ website:
           text: "K-means Combined Variables"
         - href: classification_hmm_instantaneous.qmd
           text: "HMM Instantaneous Variables"
+        - href: classification_agreement.qmd
+          text: "Agreement Between Methods"
         
     right:
       - icon: github

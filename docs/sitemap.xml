@@ -2,14 +2,26 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://swforrest.github.io/wedgie_modelling/index.html</loc>
-    <lastmod>2026-11-20T15:40:29.652Z</lastmod>
+    <lastmod>2026-11-23T18:06:01.122Z</lastmod>
+  </url>
+  <url>
+    <loc>https://swforrest.github.io/wedgie_modelling/classification_kmeans_combined.html</loc>
+    <lastmod>2026-11-24T10:43:56.002Z</lastmod>
+  </url>
+  <url>
+    <loc>https://swforrest.github.io/wedgie_modelling/classification_hmm_instantaneous.html</loc>
+    <lastmod>2026-11-24T08:36:08.123Z</lastmod>
+  </url>
+  <url>
+    <loc>https://swforrest.github.io/wedgie_modelling/classification_agreement.html</loc>
+    <lastmod>2026-11-23T18:15:17.134Z</lastmod>
   </url>
   <url>
     <loc>https://swforrest.github.io/wedgie_modelling/classification_kmeans_aggregated.html</loc>
-    <lastmod>2026-11-20T16:45:47.760Z</lastmod>
+    <lastmod>2026-11-24T10:43:48.608Z</lastmod>
   </url>
   <url>
     <loc>https://swforrest.github.io/wedgie_modelling/classification_kmeans_instantaneous.html</loc>
-    <lastmod>2026-11-20T16:41:28.197Z</lastmod>
+    <lastmod>2026-11-24T10:44:05.141Z</lastmod>
   </url>
 </urlset>

@@ -348,7 +348,7 @@ explore_vars <- c("F_AOG", "F_radians", "F_speed", "F_Sn", "F_Vrate", "F_Vrate_a
 
 # variables with negative and positive values get a diverging palette centred on 0
 diverging_vars <- c("F_radians", "F_Vrate",
-                    paste0(c("F_turn_cum", "F_Vrate_mean"), "_w", half_window_s))
+                    paste0(c("F_turn_cum", "F_Vrate_mean"), "_window"))
 
 # written as a function so it can be re-used later, e.g. with the HMM
 # behaviour labels: flight_explorer(segment_to_plot, c("behavior", explore_vars))
@@ -989,7 +989,7 @@ We subset here regardless for plotting efficiency.
 
 ```{r}
 
-eagle_subset <- eagledata4 %>% filter(name == which_data)
+eagle_subset <- eagle_data %>% filter(name == which_data)
 
 ```
 
@@ -1334,7 +1334,7 @@ explore_vars <- c("hmm3", "hmm3_prob", "hmm2", "hmm2_prob", "hmm4", "hmm4_prob",
 
 # variables with negative and positive values get a diverging palette centred on 0
 diverging_vars <- c("F_radians", "F_Vrate",
-                    paste0(c("F_turn_cum", "F_Vrate_mean"), "_w", half_window_s))
+                    paste0(c("F_turn_cum", "F_Vrate_mean"), "_window"))
 
 # written as a function so it can be re-used later, e.g. with the HMM
 # behaviour labels: flight_explorer(segment_to_plot, c("behavior", explore_vars))

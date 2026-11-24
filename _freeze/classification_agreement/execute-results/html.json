@@ -1,0 +1,19 @@
+{
+  "hash": "3b969925b04adb596b012df6cce3e6d6",
+  "result": {
+    "engine": "knitr",
+    "markdown": "---\ntitle: \"Wedge-tailed eagle behavioural classification\"\nsubtitle: \"Agreement between methods\"\nauthor: \n  - name: \"Scott Forrest\"\n    url: https://swforrest.github.io/\n    orcid: 0000-0001-9529-0108\n    affiliation: University of Tasmania, QUT\n    email: \"scottwforrest@gmail.com\"\n  - name: \"James Pay\"\n    affiliation: University of Tasmania\ndate: \"2026-11-23\"\nexecute:\n  cache: false\n  warning: false\nbibliography: references.bib\ntoc: true\nnumber-sections: false\nformat: \n  html:\n    # self-contained: true    \n    code-fold: true\n    code-summary: \"Show code\"\n    code-tools: true\n    df-print: paged\n    code-line-numbers: true\n    code-overflow: scroll\n    fig-format: png\n    fig-dpi: 150\neditor:\n  source\neditor_options: \n  chunk_output_type: inline\nabstract: |\n  Compare the state classifications based on k-means with different input variables, and hidden Markov models (HMMs).\n---\n\n# Load packages\n\n\n::: {.cell}\n\n```{.r .cell-code}\nlibrary(tidyverse)\npackages <- c(\"leaflet\")\nwalk(packages, require, character.only = T)\n```\n:::\n\n\n# Import data from the model outputs\n\n\n::: {.cell}\n\n```{.r .cell-code}\n# kmeans_instantaneous <- read_csv(\"outputs/eagle_states_kmeans_instantaneous_Stella.csv\")\n# kmeans_aggregated <- read_csv(\"outputs/eagle_states_kmeans_aggregated_Stella.csv\")\n# kmeans_combined <- read_csv(\"outputs/eagle_states_kmeans_combined_Stella.csv\")\n# hmm_instantaneous <- read_csv(\"outputs/eagle_states_hmm_instantaneous_Stella.csv\")\n```\n:::\n\n\n# References\n\n::: {#refs}\n:::\n\n# Session Information\n\n\n::: {.cell}\n\n```{.r .cell-code}\nutils::sessionInfo()\n```\n\n::: {.cell-output .cell-output-stdout}\n\n```\nR version 4.5.0 (2025-04-11)\nPlatform: aarch64-apple-darwin20\nRunning under: macOS 26.6.2\n\nMatrix products: default\nBLAS:   /Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/lib/libRblas.0.dylib \nLAPACK: /Library/Frameworks/R.framework/Versions/4.5-arm64/Resources/lib/libRlapack.dylib;  LAPACK version 3.12.1\n\nlocale:\n[1] en_US.UTF-8/en_US.UTF-8/en_US.UTF-8/C/en_US.UTF-8/en_US.UTF-8\n\ntime zone: Europe/London\ntzcode source: internal\n\nattached base packages:\n[1] stats     graphics  grDevices utils     datasets  methods   base     \n\nother attached packages:\n [1] leaflet_2.2.2   lubridate_1.9.5 forcats_1.0.0   stringr_1.6.0  \n [5] dplyr_1.2.1     purrr_1.2.2     readr_2.1.5     tidyr_1.3.1    \n [9] tibble_3.3.1    ggplot2_4.0.3   tidyverse_2.0.0\n\nloaded via a namespace (and not attached):\n [1] gtable_0.3.6       jsonlite_2.0.0     compiler_4.5.0     tidyselect_1.2.1  \n [5] dichromat_2.0-0.1  scales_1.4.0       yaml_2.3.12        fastmap_1.2.0     \n [9] R6_2.6.1           generics_0.1.4     knitr_1.51         htmlwidgets_1.6.4 \n[13] pillar_1.11.1      RColorBrewer_1.1-3 tzdb_0.5.0         rlang_1.3.0       \n[17] stringi_1.8.9      xfun_0.57          S7_0.2.2           timechange_0.4.0  \n[21] cli_3.6.6          withr_3.0.3        magrittr_2.0.5     crosstalk_1.2.1   \n[25] digest_0.6.37      grid_4.5.0         rstudioapi_0.17.1  hms_1.1.4         \n[29] lifecycle_1.0.5    vctrs_0.7.3        evaluate_1.0.5     glue_1.8.1        \n[33] farver_2.1.2       rmarkdown_2.29     tools_4.5.0        pkgconfig_2.0.3   \n[37] htmltools_0.5.8.1 \n```\n\n\n:::\n:::\n",
+    "supporting": [],
+    "filters": [
+      "rmarkdown/pagebreak.lua"
+    ],
+    "includes": {
+      "include-in-header": [
+        "<link href=\"site_libs/pagedtable-1.1/css/pagedtable.css\" rel=\"stylesheet\" />\n<script src=\"site_libs/pagedtable-1.1/js/pagedtable.js\"></script>\n"
+      ]
+    },
+    "engineDependencies": {},
+    "preserve": {},
+    "postProcess": true
+  }
+}

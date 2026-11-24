@@ -274,6 +274,14 @@ ul.task-list li input[type="checkbox"] {
     <a class="dropdown-item" href="./classification_kmeans_aggregated.html">
  <span class="dropdown-text">K-means Aggregated Variables</span></a>
   </li>  
+        <li>
+    <a class="dropdown-item" href="./classification_kmeans_combined.html">
+ <span class="dropdown-text">K-means Combined Variables</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="./classification_hmm_instantaneous.html">
+ <span class="dropdown-text">HMM Instantaneous Variables</span></a>
+  </li>  
     </ul>
   </li>
 </ul>
@@ -326,6 +334,8 @@ ul.task-list li input[type="checkbox"] {
 <ul>
 <li><a href="./classification_kmeans_instantaneous.html">K-means Instantaneous Variable</a>: using variables calculated for each GPS fix to estimate behavioural states.</li>
 <li><a href="./classification_kmeans_aggregated.html">K-means Aggregated Variables</a>: using variables that aggregate over a moving window (such as cumulative turning angles or average speed) to estimate behavioural states. This approach helps to smooth over jumpy states when using k-means, which treats each each sample independently.</li>
+<li><a href="./classification_kmeans_combined.html">K-means Combined Variables</a>: using both instantaneous and aggregated variables to estimate behavioural states.</li>
+<li><a href="./classification_hmm_instantaneous.html">Hidden Markov Model</a>: using a Hidden Markov Model to estimate behavioural states based on the observed GPS data.</li>
 </ul>
 </section>
 <section id="modelling-the-energy-landscape" class="level2">

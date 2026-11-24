@@ -1,6 +1,7 @@
 # Manually added
 data/ 
 _website_ignore/
+outputs/
 
 # History files
 .Rhistory

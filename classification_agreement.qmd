@@ -49,10 +49,10 @@ walk(packages, require, character.only = T)
 
 ```{r}
 
-kmeans_instantaneous <- read_csv("outputs/eagle_states_kmeans_instantaneous_Stella.csv")
-kmeans_aggregated <- read_csv("outputs/eagle_states_kmeans_aggregated_Stella.csv")
-kmeans_combined <- read_csv("outputs/eagle_states_kmeans_combined_Stella.csv")
-hmm_instantaneous <- read_csv("outputs/eagle_states_hmm_instantaneous_Stella.csv")
+# kmeans_instantaneous <- read_csv("outputs/eagle_states_kmeans_instantaneous_Stella.csv")
+# kmeans_aggregated <- read_csv("outputs/eagle_states_kmeans_aggregated_Stella.csv")
+# kmeans_combined <- read_csv("outputs/eagle_states_kmeans_combined_Stella.csv")
+# hmm_instantaneous <- read_csv("outputs/eagle_states_hmm_instantaneous_Stella.csv")
 
 ```
 

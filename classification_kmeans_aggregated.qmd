@@ -654,7 +654,7 @@ We subset here regardless for plotting efficiency.
 
 ```{r}
 
-eagle_subset <- eagledata4 %>% filter(name == which_data)
+eagle_subset <- eagle_data %>% filter(name == which_data)
 
 ```
 

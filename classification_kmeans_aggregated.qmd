@@ -743,8 +743,8 @@ Also, we have tried to remove perching fixes beforehand (but some still may rema
 ```{r}
 
 state_1 <- "flapping"
-state_2 <- "gliding"
-state_3 <- "ascending"
+state_2 <- "ascending"
+state_3 <- "gliding"
 # state_4 <- "..."
 
 eagle_subset <- eagle_subset %>% 

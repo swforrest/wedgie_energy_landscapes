@@ -32,7 +32,7 @@ editor:
 editor_options:
   chunk_output_type: inline
 abstract: |
-  Compare the state classifications based on k-means with different input variables, and hidden Markov models (HMMs).
+  Compare the state classifications based on k-means with different input variables, hidden Markov models (HMMs), and expectation-maximisation binary clustering (EMbC).
 ---
 
 # Load packages
@@ -53,21 +53,22 @@ kmeans_instantaneous <- read_csv("outputs/eagle_states_kmeans_instantaneous_Stel
 kmeans_aggregated <- read_csv("outputs/eagle_states_kmeans_aggregated_Stella.csv")
 kmeans_combined <- read_csv("outputs/eagle_states_kmeans_combined_Stella.csv")
 hmm <- read_csv("outputs/eagle_states_hmm_Stella.csv")
+embc <- read_csv("outputs/eagle_states_embc_aggregated_Stella.csv")
 
 ```
 
 ## Join the dataframes
 
-The dataframes have different numbers of rows, as some variables had NAs in some of the scripts but not others. We join them by the eagle's name and the start time of each step, and then only keep the fixes that were classified by all four methods.
+The dataframes have different numbers of rows, as some variables had NAs in some of the scripts but not others. We join them by the eagle's name and the start time of each step, and then only keep the fixes that were classified by all five methods.
 
-We keep the location and flight variables from the k-means instantaneous data, and only the 3-state classifications from the others (plus the probability of the most likely state from the 3-state HMM).
+We keep the location and flight variables from the k-means combined data, and only the 3-state classifications from the others (plus the probability of the most likely state from the 3-state HMM). For EMbC we use the smoothed behaviours (the `behavior` column), which are already labelled in the EMbC script.
 
 ```{r}
 
 # number of rows in each dataframe
-tibble(data = c("kmeans_instantaneous", "kmeans_aggregated", "kmeans_combined", "hmm"),
+tibble(data = c("kmeans_instantaneous", "kmeans_aggregated", "kmeans_combined", "hmm", "embc"),
        rows = c(nrow(kmeans_instantaneous), nrow(kmeans_aggregated),
-                nrow(kmeans_combined), nrow(hmm)))
+                nrow(kmeans_combined), nrow(hmm), nrow(embc)))
 
 eagle_states <- kmeans_combined %>%
   select(name, stepstart_dtime, stepend_dtime, 
@@ -81,6 +82,8 @@ eagle_states <- kmeans_combined %>%
   full_join(kmeans_instantaneous %>% select(name, stepstart_dtime, kmeans_inst = k3),
             by = c("name", "stepstart_dtime")) %>%
   full_join(hmm %>% select(name, stepstart_dtime, hmm = hmm3, hmm3_prob),
+            by = c("name", "stepstart_dtime")) %>%
+  full_join(embc %>% select(name, stepstart_dtime, embc = behavior),
             by = c("name", "stepstart_dtime"))
 
 # number of rows after joining
@@ -88,9 +91,9 @@ nrow(eagle_states)
 
 # drop rows that are missing a state from any of the methods
 eagle_states <- eagle_states %>%
-  drop_na(kmeans_inst, kmeans_agg, kmeans_comb, hmm)
+  drop_na(kmeans_inst, kmeans_agg, kmeans_comb, hmm, embc)
 
-# number of rows that were classified by all four methods
+# number of rows that were classified by all five methods
 nrow(eagle_states)
 
 ```
@@ -99,17 +102,18 @@ nrow(eagle_states)
 
 The cluster (k-means) and state (HMM) numbers are arbitrary, so state 1 in one method isn't necessarily state 1 in another. Here we assign the same behaviour labels that were given to the 3-state models in each of the classification scripts.
 
-Note that these need to match the labels in the classification scripts - if the models are re-run and the numbers change, update them here as well.
+Note that these need to match the labels in the classification scripts - if the models are re-run and the numbers change, update them here as well. The EMbC behaviours are already labelled, so they don't need to be changed here.
 
 ```{r}
 
 # the names of the state columns, and labels to use in the plots
-state_cols <- c("kmeans_inst", "kmeans_agg", "kmeans_comb", "hmm")
+state_cols <- c("kmeans_inst", "kmeans_agg", "kmeans_comb", "hmm", "embc")
 
 method_labels <- c(kmeans_inst = "K-means instantaneous",
                    kmeans_agg = "K-means aggregated",
                    kmeans_comb = "K-means combined",
-                   hmm = "HMM instantaneous")
+                   hmm = "HMM instantaneous",
+                   embc = "EMbC aggregated")
 
 # colours that are used in all of the plots and the map
 state_colours <- c(ascending = "#E69F00", flapping = "#56B4E9", gliding = "#009E73")
@@ -118,8 +122,9 @@ state_colours <- c(ascending = "#E69F00", flapping = "#56B4E9", gliding = "#009E
 # consensus_colours <- c(state_colours, "no majority" = "#999999")
 consensus_colours <- c(state_colours, "no majority" = "red")
 
-agreement_colours <- c("all 4 agree" = "#0072B2",
-                       "3 of 4 agree" = "#F0E442",
+agreement_colours <- c("all 5 agree" = "#0072B2",
+                       "4 of 5 agree" = "#56B4E9",
+                       "3 of 5 agree" = "#F0E442",
                        "no majority" = "#D55E00")
 
 # the labels from each classification script
@@ -130,9 +135,11 @@ eagle_states <- eagle_states %>%
                             kmeans_inst == 2 ~ "gliding",
                             kmeans_inst == 3 ~ "flapping"),
     
+    # cluster 2 has a positive mean vertical rate and high cumulative turning
+    # (ascending), and cluster 3 a negative vertical rate (gliding)
     kmeans_agg = case_when(kmeans_agg == 1 ~ "flapping",
-                           kmeans_agg == 2 ~ "gliding",
-                           kmeans_agg == 3 ~ "ascending"),
+                           kmeans_agg == 2 ~ "ascending",
+                           kmeans_agg == 3 ~ "gliding"),
     
     kmeans_comb = case_when(kmeans_comb == 1 ~ "gliding",
                             kmeans_comb == 2 ~ "flapping",
@@ -150,12 +157,12 @@ eagle_states <- eagle_states %>%
 
 ## Calculate the agreement between the methods
 
-For each fix we count how many of the four methods classified it as each state. From this we get:
+For each fix we count how many of the five methods classified it as each state. From this we get:
 
-- `n_agree` - the number of methods that agree on the most common state (2, 3 or 4)
-- `agreement` - whether all 4 methods agree, 3 of the 4 agree, or there is no majority (a 2-2 or 2-1-1 split)
-- `consensus` - the state that at least 3 of the 4 methods agree on (otherwise 'no majority')
-- `odd_one_out` - when 3 of the 4 methods agree, the method that disagrees
+- `n_agree` - the number of methods that agree on the most common state (2, 3, 4 or 5)
+- `agreement` - whether all 5 methods agree, 4 of the 5 agree, 3 of the 5 agree, or there is no majority (a 2-2-1 split)
+- `consensus` - the state that at least 3 of the 5 methods agree on (otherwise 'no majority')
+- `odd_one_out` - when 4 of the 5 methods agree, the method that disagrees
 
 ```{r}
 
@@ -169,22 +176,25 @@ eagle_states <- eagle_states %>%
     # the number of methods that agree on the most common state
     n_agree = pmax(n_ascending, n_flapping, n_gliding),
 
-    agreement = case_when(n_agree == 4 ~ "all 4 agree",
-                          n_agree == 3 ~ "3 of 4 agree",
+    agreement = case_when(n_agree == 5 ~ "all 5 agree",
+                          n_agree == 4 ~ "4 of 5 agree",
+                          n_agree == 3 ~ "3 of 5 agree",
                           n_agree == 2 ~ "no majority"),
 
-    # the state that at least 3 of the 4 methods agree on
+    # the state that at least 3 of the 5 methods agree on (only one state can
+    # have a majority, as 3 + 3 > 5)
     consensus = case_when(n_ascending >= 3 ~ "ascending",
                           n_flapping >= 3 ~ "flapping",
                           n_gliding >= 3 ~ "gliding",
                           TRUE ~ "no majority"),
 
-    # when 3 of the 4 methods agree, which method disagrees?
-    odd_one_out = case_when(n_agree != 3 ~ NA,
+    # when 4 of the 5 methods agree, which method disagrees?
+    odd_one_out = case_when(n_agree != 4 ~ NA,
                             kmeans_inst != consensus ~ method_labels["kmeans_inst"],
                             kmeans_agg != consensus ~ method_labels["kmeans_agg"],
                             kmeans_comb != consensus ~ method_labels["kmeans_comb"],
-                            hmm != consensus ~ method_labels["hmm"])
+                            hmm != consensus ~ method_labels["hmm"],
+                            embc != consensus ~ method_labels["embc"])
     ) %>%
   # set the order of the levels for plotting
   mutate(agreement = factor(agreement, levels = names(agreement_colours)),
@@ -201,7 +211,7 @@ eagle_states_long <- eagle_states %>%
   select(stepstart_dtime, all_of(state_cols), n_ascending, n_flapping, n_gliding) %>%
   pivot_longer(all_of(state_cols), names_to = "method", values_to = "state") %>%
   mutate(method = factor(method_labels[method], levels = method_labels),
-         # how many of the OTHER three methods agree with this method's state
+         # how many of the OTHER four methods agree with this method's state
          n_others_agree = case_when(state == "ascending" ~ n_ascending - 1,
                                     state == "flapping" ~ n_flapping - 1,
                                     state == "gliding" ~ n_gliding - 1))
@@ -279,8 +289,8 @@ ggplot(pairwise_agreement, aes(x = method_b, y = method_a, fill = agreement)) +
 The proportion of all fixes with each combination of states, for each pair of methods. The rows are the states from the method on the right and the columns are the states from the method at the top. The diagonal (top left to bottom right) is where the two methods agree, and the off-diagonals show which states are confused with each other.
 
 ```{r}
-#| fig-width: 10
-#| fig-height: 9
+#| fig-width: 12
+#| fig-height: 11
 
 pairwise_tables <- map(method_pairs, \(pair) {
   eagle_states %>%
@@ -307,11 +317,11 @@ ggplot(pairwise_tables, aes(x = state_b, y = state_a, fill = prop)) +
 
 ```
 
-# Agreement between all four methods
+# Agreement between all five methods
 
 ## How often do the methods agree?
 
-The bars are coloured by the consensus state (the state that at least 3 of the 4 methods agree on).
+The bars are coloured by the consensus state (the state that at least 3 of the 5 methods agree on).
 
 ```{r}
 
@@ -331,10 +341,10 @@ ggplot(eagle_states, aes(x = agreement, fill = consensus)) +
 
 ## Agreement for each method and state
 
-When a method classifies a fix as a particular state, how many of the other three methods agree with it? States that have lots of 3s (dark) are consistently identified, regardless of the method.
+When a method classifies a fix as a particular state, how many of the other four methods agree with it? States that have lots of 4s (dark) are consistently identified, regardless of the method.
 
 ```{r}
-#| fig-width: 10
+#| fig-width: 12
 
 ggplot(eagle_states_long, aes(x = state, fill = factor(n_others_agree))) +
   geom_bar(position = "fill") +
@@ -348,12 +358,12 @@ ggplot(eagle_states_long, aes(x = state, fill = factor(n_others_agree))) +
 
 ## Which method is the odd one out?
 
-When 3 of the 4 methods agree, which method disagrees? The bars are coloured by the state that the other three methods agreed on.
+When 4 of the 5 methods agree, which method disagrees? The bars are coloured by the state that the other four methods agreed on.
 
 ```{r}
 
 eagle_states %>%
-  filter(n_agree == 3) %>%
+  filter(n_agree == 4) %>%
   ggplot(aes(x = odd_one_out, fill = consensus)) +
   geom_bar() +
   scale_fill_manual(values = consensus_colours) +
@@ -466,7 +476,6 @@ segment_explore <- eagle_states %>%
   mutate(fix = row_number())
 
 ```
-
 
 ## 2D plot (x-y)
 
@@ -605,7 +614,7 @@ The whole segment is too dense to see clearly, so we only plot a window of 300 f
 
 ```{r}
 #| fig-width: 10
-#| fig-height: 3.5
+#| fig-height: 4
 
 # the first and last fix to plot
 fix_window <- c(1, 300)
@@ -632,7 +641,7 @@ segment_explore %>%
 
 # Data explorer with states and agreement
 
-The same data explorer as in the classification scripts, coloured by the agreement between methods, the consensus state, the states from each of the 3-state models, the probability of the most likely HMM state, and some of the flight variables. Use the 'Colour by' dropdown to switch between them, and hover over a fix to see all of the values.
+The same data explorer as in the classification scripts, coloured by the agreement between methods, the consensus state, the states from each of the methods, the probability of the most likely HMM state, and some of the flight variables. Use the 'Colour by' dropdown to switch between them, and hover over a fix to see all of the values.
 
 ```{r}
 
@@ -650,7 +659,8 @@ map_colours <- list(agreement = agreement_colours,
                     kmeans_inst = state_colours,
                     kmeans_agg = state_colours,
                     kmeans_comb = state_colours,
-                    hmm = state_colours)
+                    hmm = state_colours,
+                    embc = state_colours)
 
 # the same function as in the classification scripts, with one addition - the
 # 'colours' argument, which sets the colours of categorical variables

@@ -131,8 +131,8 @@ eagle_states <- eagle_states %>%
                             kmeans_inst == 3 ~ "flapping"),
     
     kmeans_agg = case_when(kmeans_agg == 1 ~ "flapping",
-                           kmeans_agg == 2 ~ "gliding",
-                           kmeans_agg == 3 ~ "ascending"),
+                           kmeans_agg == 2 ~ "ascending",
+                           kmeans_agg == 3 ~ "gliding"),
     
     kmeans_comb = case_when(kmeans_comb == 1 ~ "gliding",
                             kmeans_comb == 2 ~ "flapping",
@@ -190,6 +190,20 @@ eagle_states <- eagle_states %>%
   mutate(agreement = factor(agreement, levels = names(agreement_colours)),
          consensus = factor(consensus, levels = names(consensus_colours)),
          odd_one_out = factor(odd_one_out, levels = method_labels))
+
+```
+
+## Remove fixes below a minimum altitude
+
+We want to exclude locations that are associated with taking off or landing.
+
+```{r}
+
+# to exclude fixes that are associated with taking off or landing
+min_altitude <- 50 
+
+eagle_states <- eagle_states %>% 
+  filter(F_AOG >= min_altitude)
 
 ```
 
@@ -396,23 +410,21 @@ For each soaring fix we calculate the gap between the end of the previous soarin
 
 Short interruptions (e.g. a few fixes of gliding between thermals, or a misclassified fix) therefore stay within the same bout.
 
-Bouts that are shorter than `min_bout_s` (60 seconds) are removed in the next section, as these are often only a few fixes (sometimes just one) and are more likely to be brief climbs or misclassifications than thermal or slope soaring.
+Bouts that are shorter than `min_bout_s` are removed in the next section, as these are often only a few fixes (sometimes just one) and are more likely to be brief climbs or misclassifications than thermal or slope soaring.
 
 ```{r}
-
-soaring_locations <- eagle_states %>% filter(consensus == "ascending")
 
 # the longest gap (in seconds) between soaring fixes within the same bout
 max_gap_s <- 60
 
 # the shortest bout (in seconds) to keep - shorter bouts are removed below
-min_bout_s <- 60
+min_bout_s <- 30
 
 # split soaring into bouts if there are gaps more than max_gap_s seconds
-soaring_locations <- soaring_locations %>%
+eagle_states <- eagle_states %>%
   # put the fixes in time order for each eagle
   arrange(name, stepstart_dtime) %>%
-  group_by(name) %>%
+  group_by(name, consensus) %>%
   mutate(
     # time (s) between the end of the previous soaring step and the start of this one
     gap_s = as.numeric(difftime(stepstart_dtime, lag(stepend_dtime), units = "secs")),
@@ -426,11 +438,23 @@ soaring_locations <- soaring_locations %>%
   ) %>%
   ungroup() %>%
   # a unique id for each bout (in case there are multiple eagles)
-  mutate(bout_id = paste(name, bout_n, sep = "_"))
+  mutate(bout_id = paste(name, consensus, bout_n, sep = "_"))
 
+```
+
+## Split into the different states
+
+```{r}
+
+soaring_locations <- eagle_states %>% filter(consensus == "ascending")
 # number of soaring fixes and soaring bouts
-nrow(soaring_locations)
-n_distinct(soaring_locations$bout_id)
+paste0("Number of soaring locations = ", nrow(soaring_locations))
+paste0("Number of soaring bouts = ", n_distinct(soaring_locations$bout_id))
+
+flapping_locations <- eagle_states %>% filter(consensus == "flapping")
+# number of flapping fixes and flapping bouts
+paste0("Number of flapping locations = ", nrow(flapping_locations))
+paste0("Number of flapping bouts = ", n_distinct(flapping_locations$bout_id))
 
 ```
 
@@ -461,11 +485,16 @@ soaring_bouts <- soaring_locations %>%
     soaring_s = sum(step_s),
     alt_gain_m = sum(F_Vrate * step_s),
     mean_Vrate = mean(F_Vrate),
+    # the start of the bout (in UTM for ggplot and lat/lon for leaflet)
+    utme = first(stepend_utme, order_by = stepstart_dtime),
+    utmn = first(stepend_utmn, order_by = stepstart_dtime),
+    lat  = first(lat,          order_by = stepstart_dtime),
+    lon  = first(lon,          order_by = stepstart_dtime),
     # the centre of the bout (in UTM for ggplot and lat/lon for leaflet)
-    utme = mean(stepend_utme),
-    utmn = mean(stepend_utmn),
-    lat = mean(lat),
-    lon = mean(lon),
+    utme_mean = mean(stepend_utme),
+    utmn_mean = mean(stepend_utmn),
+    lat_mean = mean(lat),
+    lon_mean = mean(lon),
     .groups = "drop"
   )
 
@@ -486,9 +515,63 @@ soaring_bouts
 
 ```
 
+## Summarise the flapping bouts
+
+We do the same as above but for the flapping bouts.
+
+```{r}
+
+flapping_bouts <- flapping_locations %>%
+  # duration of each step (s)
+  mutate(step_s = as.numeric(difftime(stepend_dtime, stepstart_dtime, units = "secs"))) %>%
+  # (bout_n before bout_id, so the bouts stay in time order)
+  group_by(name, bout_n, bout_id) %>%
+  summarise(
+    flight_n = first(flight_n),
+    start = min(stepstart_dtime),
+    end = max(stepend_dtime),
+    n_fixes = n(),
+    duration_s = as.numeric(difftime(end, start, units = "secs")),
+    flapping_s = sum(step_s),
+    alt_gain_m = sum(F_Vrate * step_s),
+    mean_Vrate = mean(F_Vrate),
+    # the start of the bout (in UTM for ggplot and lat/lon for leaflet)
+    utme = first(stepend_utme, order_by = stepstart_dtime),
+    utmn = first(stepend_utmn, order_by = stepstart_dtime),
+    lat  = first(lat,          order_by = stepstart_dtime),
+    lon  = first(lon,          order_by = stepstart_dtime),
+    # the centre of the bout (in UTM for ggplot and lat/lon for leaflet)
+    utme_mean = mean(stepend_utme),
+    utmn_mean = mean(stepend_utmn),
+    lat_mean = mean(lat),
+    lon_mean = mean(lon),
+    .groups = "drop"
+  )
+
+# number of bouts before removing the short ones
+nrow(flapping_bouts)
+
+# remove the bouts that are shorter than min_bout_s
+flapping_bouts <- flapping_bouts %>% filter(duration_s >= min_bout_s)
+
+# and remove the flapping fixes that were in those short bouts
+flapping_locations <- flapping_locations %>% filter(bout_id %in% flapping_bouts$bout_id)
+
+# number of bouts and flapping fixes that are left
+nrow(flapping_bouts)
+nrow(flapping_locations)
+
+flapping_bouts
+
+```
+
 ## Diagnostic plots
 
 The distributions of the bout durations and the altitude gained in each bout.
+
+::: {.panel-tabset}
+
+### Soaring bouts
 
 ```{r}
 
@@ -507,6 +590,28 @@ soaring_bouts %>%
   theme_bw()
 
 ```
+
+### Flapping bouts
+
+```{r}
+
+# distribution of the bout durations
+flapping_bouts %>%
+  ggplot() +
+  geom_histogram(aes(x = duration_s / 60), bins = 100) +
+  labs(x = "Flapping bout duration (minutes)", y = "Number of bouts") +
+  theme_bw()
+
+# distribution of the altitude gained in each bout
+flapping_bouts %>%
+  ggplot() +
+  geom_histogram(aes(x = alt_gain_m), bins = 100) +
+  labs(x = "Altitude gained in the flapping bout (m)", y = "Number of bouts") +
+  theme_bw()
+
+```
+
+:::
 
 ## Time spent soaring
 
@@ -528,13 +633,17 @@ eagle_states %>%
 
 ```
 
-# Soaring through time
+# Behaviours through time
 
 The timestamps are in UTC, so we convert them to local Tasmanian time (which accounts for daylight saving) before getting the date and hour of the day.
 
-For each soaring fix we also calculate the altitude gained during that step (`step_alt_gain_m`), so that the altitude gained in each hour or day comes from the fixes in that hour or day (a bout that runs from 11:55 to 12:10 is split between the 11:00 and 12:00 hours). The number of bouts is counted by the time that each bout started.
+For each fix we also calculate the altitude gained or lost during that step (`step_alt_gain_m`), so that the altitude gained in each hour or day comes from the fixes in that hour or day (a bout that runs from 11:55 to 12:10 is split between the 11:00 and 12:00 hours). The number of bouts is counted by the time that each bout started.
 
-As well as the number of bouts and the altitude gained, we calculate the proportion of the flight time that was spent soaring. This accounts for there being more soaring bouts at times when the eagle is flying more (and when there is more tracking data).
+As well as the number of bouts and the altitude gained, we calculate the proportion of the flight time in that behaviour. This accounts for there being more soaring bouts at times when the eagle is flying more (and when there is more tracking data).
+
+::: {.panel-tabset}
+
+## Soaring locations
 
 ```{r}
 
@@ -569,7 +678,7 @@ time_labels <- c(n_bouts = "Number of soaring bouts",
 
 ```
 
-## Hour of the day
+### Hour of the day
 
 The totals for each hour of the day, across all of the days (and eagles).
 
@@ -609,7 +718,7 @@ soaring_hourly %>%
 
 ```
 
-## Through the tracking period
+### Through the tracking period
 
 The daily totals through the tracking period. Days where the eagle didn't fly (or had no data) are left blank.
 
@@ -647,7 +756,7 @@ soaring_daily %>%
 
 ```
 
-## Hour of the day through the tracking period
+### Hour of the day through the tracking period
 
 The altitude gained in each hour of each day, which shows how the daily pattern of soaring changes through the year (e.g. with day length). Blank cells are hours with no soaring.
 
@@ -668,11 +777,147 @@ soaring_locations %>%
 
 ```
 
-# Where do the eagles soar?
+## Flapping locations
+
+```{r}
+
+# local time zone (Tasmania)
+local_tz <- "Australia/Hobart"
+
+# add the step duration, local time, date and hour to the flight data
+eagle_states <- eagle_states %>%
+  mutate(step_s = as.numeric(difftime(stepend_dtime, stepstart_dtime, units = "secs")),
+         local_time = with_tz(stepstart_dtime, local_tz),
+         date = as_date(local_time),
+         hour = hour(local_time))
+
+# and to the flapping fixes, with the altitude gained during each step
+flapping_locations <- flapping_locations %>%
+  mutate(step_s = as.numeric(difftime(stepend_dtime, stepstart_dtime, units = "secs")),
+         step_alt_gain_m = F_Vrate * step_s,
+         local_time = with_tz(stepstart_dtime, local_tz),
+         date = as_date(local_time),
+         hour = hour(local_time))
+
+# and the start of each flapping bout
+flapping_bouts <- flapping_bouts %>%
+  mutate(start_local = with_tz(start, local_tz),
+         date = as_date(start_local),
+         hour = hour(start_local))
+
+# labels for the panels in the plots below
+time_labels <- c(n_bouts = "Number of flapping bouts",
+                 alt_gain_m = "Altitude gained while flapping (m)",
+                 prop_flapping = "Proportion of flight time spent flapping")
+
+```
+
+### Hour of the day
+
+The totals for each hour of the day, across all of the days (and eagles).
+
+```{r}
+#| fig-width: 8
+#| fig-height: 7
+
+# flight time in each hour
+flapping_hourly <- eagle_states %>%
+  group_by(hour) %>%
+  summarise(flight_h = sum(step_s) / 3600) %>%
+  # number of bouts that started in each hour
+  left_join(flapping_bouts %>% count(hour, name = "n_bouts"),
+            by = "hour") %>%
+  # altitude gained and time spent flapping in each hour
+  left_join(flapping_locations %>%
+              group_by(hour) %>%
+              summarise(alt_gain_m = sum(step_alt_gain_m),
+                        flapping_h = sum(step_s) / 3600),
+            by = "hour") %>%
+  # hours with flight but no flapping have 0 bouts and 0 altitude gained
+  mutate(across(c(n_bouts, alt_gain_m, flapping_h), \(x) replace_na(x, 0)),
+         prop_flapping = flapping_h / flight_h)
+
+flapping_hourly
+
+flapping_hourly %>%
+  pivot_longer(c(n_bouts, alt_gain_m, prop_flapping), names_to = "variable") %>%
+  mutate(variable = factor(time_labels[variable], levels = time_labels)) %>%
+  ggplot() +
+  geom_col(aes(x = hour, y = value), fill = state_colours["flapping"]) +
+  facet_wrap(~ variable, ncol = 1, scales = "free_y") +
+  scale_x_continuous(breaks = 0:23) +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(x = "Hour of the day (local time)", y = NULL) +
+  theme_bw()
+
+```
+
+### Through the tracking period
+
+The daily totals through the tracking period. Days where the eagle didn't fly (or had no data) are left blank.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 7
+
+# flight time on each day
+flapping_daily <- eagle_states %>%
+  group_by(date) %>%
+  summarise(flight_h = sum(step_s) / 3600) %>%
+  # number of bouts that started on each day
+  left_join(flapping_bouts %>% count(date, name = "n_bouts"),
+            by = "date") %>%
+  # altitude gained and time spent flapping on each day
+  left_join(flapping_locations %>%
+              group_by(date) %>%
+              summarise(alt_gain_m = sum(step_alt_gain_m),
+                        flapping_h = sum(step_s) / 3600),
+            by = "date") %>%
+  # days with flight but no flapping have 0 bouts and 0 altitude gained
+  mutate(across(c(n_bouts, alt_gain_m, flapping_h), \(x) replace_na(x, 0)),
+         prop_flapping = flapping_h / flight_h)
+
+flapping_daily %>%
+  pivot_longer(c(n_bouts, alt_gain_m, prop_flapping), names_to = "variable") %>%
+  mutate(variable = factor(time_labels[variable], levels = time_labels)) %>%
+  ggplot() +
+  geom_col(aes(x = date, y = value), fill = state_colours["flapping"], width = 1) +
+  facet_wrap(~ variable, ncol = 1, scales = "free_y") +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b\n%Y") +
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(x = "Date", y = NULL) +
+  theme_bw()
+
+```
+
+### Hour of the day through the tracking period
+
+The altitude gained in each hour of each day, which shows how the daily pattern of flapping changes through the year (e.g. with day length). Blank cells are hours with no flapping.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+
+flapping_locations %>%
+  group_by(date, hour) %>%
+  summarise(alt_gain_m = sum(step_alt_gain_m), .groups = "drop") %>%
+  ggplot() +
+  geom_tile(aes(x = date, y = hour, fill = alt_gain_m)) +
+  scale_fill_viridis_c() +
+  scale_x_date(date_breaks = "2 months", date_labels = "%b\n%Y") +
+  scale_y_continuous(breaks = seq(0, 23, 2)) +
+  labs(x = "Date", y = "Hour of the day (local time)", fill = "Altitude\ngained (m)") +
+  theme_bw()
+
+```
+
+:::
+
+# Where do the eagles show different behaviours?
 
 ## Spatial layers
 
-We read in the spatial layers and crop them to the area around the soaring locations (plus a buffer), so they are quick to plot. Add any other rasters to `raster_files` to include them in the leaflet map below - the names are used as the layer names in the map.
+We read in the spatial layers and crop them to the area around all of the flight locations (plus a buffer), so they are quick to plot. We use all of the flight locations rather than only the soaring locations so that the grid used to calculate the proportion of time soaring (below) covers the areas where the eagles flew but didn't soar. Add any other rasters to `raster_files` to include them in the leaflet map below - the names are used as the layer names in the map.
 
 The rasters are at 30 m resolution. If the soaring locations cover a large area (e.g. when using all eagles), uncomment the `aggregate()` line to use a coarser resolution, otherwise the maps will be slow and the leaflet map may hit its size limit.
 
@@ -685,13 +930,13 @@ raster_files <- c(elevation = "mapping/HS_DEM.tif",
                   ruggedness = "mapping/HS_Ruggedness.tif",
                   aspect = "mapping/Aspect_degrees.tif")
 
-# the area to crop to - the extent of the soaring locations plus a buffer (m)
+# the area to crop to - the extent of all of the flight locations plus a buffer (m)
 buffer_m <- 2000
 
-crop_area <- ext(min(soaring_locations$stepend_utme) - buffer_m,
-                 max(soaring_locations$stepend_utme) + buffer_m,
-                 min(soaring_locations$stepend_utmn) - buffer_m,
-                 max(soaring_locations$stepend_utmn) + buffer_m) %>%
+crop_area <- ext(min(eagle_states$stepend_utme) - buffer_m,
+                 max(eagle_states$stepend_utme) + buffer_m,
+                 min(eagle_states$stepend_utmn) - buffer_m,
+                 max(eagle_states$stepend_utmn) + buffer_m) %>%
   # the eagle locations are in GDA94 / MGA zone 55
   vect(crs = "EPSG:28355")
 
@@ -711,6 +956,10 @@ spatial_layers
 ## Static maps
 
 Maps of the soaring locations, the altitude gained in hexagonal cells, and the centres of each soaring bout. Elevation contours are shown in grey (every `contour_m` metres).
+
+::: {.panel-tabset}
+
+## Soaring
 
 ::: {.panel-tabset}
 
@@ -737,7 +986,7 @@ ggplot() +
 
 ```
 
-### Altitude gained (hexagons)
+### Altitude gained soaring
 
 The total altitude gained while soaring in each hexagonal cell, summed over all of the soaring fixes in that cell. The width of the cells is set by `hex_width_m`.
 
@@ -781,6 +1030,82 @@ ggplot() +
   theme_bw()
 
 ```
+
+:::
+
+## Flapping
+
+::: {.panel-tabset}
+
+### Flapping locations
+
+All of the flapping fixes that are in bouts of at least `min_bout_s`.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+# elevation contour interval (m)
+contour_m <- 10
+
+ggplot() +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "black", linewidth = 0.2) +
+  geom_point(data = flapping_locations,
+             aes(x = stepend_utme, y = stepend_utmn),
+             colour = state_colours["flapping"], size = 0.1, alpha = 0.1) +
+  labs(x = NULL, y = NULL) +
+  theme_bw()
+
+```
+
+### Altitude gained flapping
+
+The total altitude gained while flapping in each hexagonal cell, summed over all of the flapping fixes in that cell. The width of the cells is set by `hex_width_m`.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+# width of the hexagonal cells (m)
+hex_width_m <- 250
+
+ggplot() +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "grey70", linewidth = 0.2) +
+  stat_summary_hex(data = flapping_locations,
+                   aes(x = stepend_utme, y = stepend_utmn, z = step_alt_gain_m),
+                   fun = sum, binwidth = hex_width_m, alpha = 0.9) +
+  scale_fill_viridis_c(option = "magma") +
+  labs(x = NULL, y = NULL, fill = "Altitude\ngained (m)") +
+  theme_bw()
+
+```
+
+### Bout centres
+
+The centre of each flapping bout, coloured by the altitude gained in that bout (the bouts with the most altitude gained are plotted on top).
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+ggplot() +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "grey70", linewidth = 0.2) +
+  geom_point(data = flapping_bouts %>% arrange(alt_gain_m),
+             aes(x = utme, y = utmn, colour = alt_gain_m),
+             size = 1, alpha = 0.8) +
+  scale_colour_viridis_c() +
+  labs(x = NULL, y = NULL, colour = "Altitude\ngained (m)") +
+  theme_bw()
+
+```
+
+:::
 
 :::
 
@@ -835,6 +1160,213 @@ soaring_map %>%
 
 ```
 
+# Calculate the proportion of time soaring
+
+For every cell, we calculate the total time spent soaring (the sum of the step durations of the soaring fixes in that cell) and the total flight time (the sum of the step durations of all fixes in that cell). The proportion of time spent soaring is then the soaring time divided by the flight time.
+
+The grid is made by aggregating the 30 m elevation raster into larger cells (`cell_size_m`), so that the cells line up with the spatial layers, and the landscape variables can be aggregated to exactly the same cells for the modelling. Smaller cells match the landscape features more closely, but have fewer fixes in each, so the proportions are noisier (for Stella, the median number of fixes in a cell is 9 at 30 m, compared to 65 at 150 m). `cell_size_m` needs to be a multiple of 30 m.
+
+Each fix is assigned to a cell by the location at the end of its step (the same location used in the maps above).
+
+- The flight time includes every fix that was classified by all four methods (including fixes with no majority), as in the 'Time spent soaring' section above.
+- The soaring time only includes the soaring fixes in bouts of at least `min_bout_s`, so the soaring fixes in shorter bouts count towards the flight time but not the soaring time.
+- The cells are combined across eagles. To calculate them separately for each eagle, add `name` to both `group_by()` calls (the maps would then need to be filtered to one eagle).
+
+## Behvaioural time in each cell
+
+```{r}
+
+# size of the grid cells (m) - a multiple of the 30 m resolution of the spatial layers
+cell_size_m <- 150
+
+# make the grid by combining the 30 m elevation cells into larger cells
+# (fact is the number of 30 m cells along each side of a larger cell)
+behaviour_grid <- aggregate(spatial_layers$elevation,
+                          fact = cell_size_m / res(spatial_layers$elevation)[1])
+
+behaviour_grid
+
+# the grid cell that each fix is in (from the end location of each step)
+eagle_states <- eagle_states %>%
+  mutate(cell = cellFromXY(behaviour_grid, cbind(stepend_utme, stepend_utmn)))
+
+soaring_locations <- soaring_locations %>%
+  mutate(cell = cellFromXY(behaviour_grid, cbind(stepend_utme, stepend_utmn)))
+
+flapping_locations <- flapping_locations %>%
+  mutate(cell = cellFromXY(behaviour_grid, cbind(stepend_utme, stepend_utmn)))
+
+# check that all of the fixes are inside the grid (this should be 0)
+sum(is.na(eagle_states$cell))
+
+# flight time in each cell
+behaviour_cells <- eagle_states %>%
+  group_by(cell) %>%
+  summarise(n_fixes = n(),
+            flight_s = sum(step_s)) %>%
+  # soaring time in each cell
+  left_join(soaring_locations %>%
+              group_by(cell) %>%
+              summarise(n_soaring_fixes = n(),
+                        soaring_s = sum(step_s)),
+            by = "cell") %>%
+  # flapping time in each cell
+  left_join(flapping_locations %>%
+              group_by(cell) %>%
+              summarise(n_flapping_fixes = n(),
+                        flapping_s = sum(step_s)),
+            by = "cell") %>%
+  mutate(
+    # cells with flight but no soaring have 0 soaring time
+    across(c(n_soaring_fixes, soaring_s), \(x) replace_na(x, 0)),
+    across(c(n_flapping_fixes, flapping_s), \(x) replace_na(x, 0)),
+    prop_soaring = soaring_s / flight_s,
+    prop_flapping = flapping_s / flight_s,
+    # the coordinates of the centre of each cell
+    x = xFromCell(behaviour_grid, cell),
+    y = yFromCell(behaviour_grid, cell)
+  )
+
+behaviour_cells
+
+# number of cells with flight, and the number of those with some soaring
+nrow(behaviour_cells)
+sum(behaviour_cells$soaring_s > 0)
+sum(behaviour_cells$flapping_s > 0)
+
+```
+
+## Total flight time
+
+The flight time in each cell (on a log scale), which shows how much data there is for calculating the proportion of time soaring.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+ggplot() +
+  geom_tile(data = behaviour_cells,
+            aes(x = x, y = y, fill = flight_s / 60),
+            width = cell_size_m, height = cell_size_m) +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "white", linewidth = 0.2) +
+  scale_fill_viridis_c(trans = "log10", labels = scales::label_comma()) +
+  labs(x = NULL, y = NULL, fill = "Flight time\n(minutes)") +
+  theme_bw()
+
+```
+
+::: {.panel-tabset}
+
+## Soaring time
+
+The soaring time in each cell (on a log scale).
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+ggplot() +
+  geom_tile(data = behaviour_cells,
+            aes(x = x, y = y, fill = soaring_s / 60),
+            width = cell_size_m, height = cell_size_m) +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "white", linewidth = 0.2) +
+  scale_fill_viridis_c(trans = "log10", labels = scales::label_comma()) +
+  labs(x = NULL, y = NULL, fill = "Soaring time\n(minutes)") +
+  theme_bw()
+
+```
+
+## Flapping time
+
+The flapping time in each cell (on a log scale).
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+ggplot() +
+  geom_tile(data = behaviour_cells,
+            aes(x = x, y = y, fill = flapping_s / 60),
+            width = cell_size_m, height = cell_size_m) +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "white", linewidth = 0.2) +
+  scale_fill_viridis_c(trans = "log10", labels = scales::label_comma()) +
+  labs(x = NULL, y = NULL, fill = "Flapping time\n(minutes)") +
+  theme_bw()
+
+```
+
+## Proprtion soaring
+
+The proportion of the flight time spent soaring in each cell. Cells with only a few fixes can only have a few values (e.g. a cell with 1 fix is either 0 or 1), so we only show the cells with at least `min_cell_fixes` fixes (the other cells are still in `soaring_cells`).
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+# the minimum number of fixes in a cell to show it in the map
+min_cell_fixes <- 10
+
+ggplot() +
+  geom_tile(data = behaviour_cells %>% filter(n_fixes >= min_cell_fixes),
+            aes(x = x, y = y, fill = prop_soaring),
+            width = cell_size_m, height = cell_size_m) +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "white", linewidth = 0.2) +
+  scale_fill_viridis_c(limits = c(0, 1)) +
+  labs(x = NULL, y = NULL, fill = "Proportion\nof time\nsoaring") +
+  theme_bw()
+
+# distribution of the proportion of time soaring across the cells
+behaviour_cells %>%
+  filter(n_fixes >= min_cell_fixes) %>%
+  ggplot() +
+  geom_histogram(aes(x = prop_soaring), bins = 50) +
+  labs(x = "Proportion of time soaring in the cell", y = "Number of cells") +
+  theme_bw()
+
+```
+
+## Proportion flapping
+
+The proportion of the flight time spent flapping in each cell. Cells with only a few fixes can only have a few values (e.g. a cell with 1 fix is either 0 or 1), so we only show the cells with at least `min_cell_fixes` fixes (the other cells are still in `flapping_cells`).
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+# the minimum number of fixes in a cell to show it in the map
+min_cell_fixes <- 10
+
+ggplot() +
+  geom_tile(data = behaviour_cells %>% filter(n_fixes >= min_cell_fixes),
+            aes(x = x, y = y, fill = prop_flapping),
+            width = cell_size_m, height = cell_size_m) +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "white", linewidth = 0.2) +
+  scale_fill_viridis_c(limits = c(0, 1)) +
+  labs(x = NULL, y = NULL, fill = "Proportion\nof time\nflapping") +
+  theme_bw()
+
+# distribution of the proportion of time flapping across the cells
+behaviour_cells %>%
+  filter(n_fixes >= min_cell_fixes) %>%
+  ggplot() +
+  geom_histogram(aes(x = prop_flapping), bins = 50) +
+  labs(x = "Proportion of time flapping in the cell", y = "Number of cells") +
+  theme_bw()
+
+```
+
+:::
+
 ## Prevalence of soaring
 
 There are multiple different ways that we could associate climbing behaviour with landscape variables to predict where wedge-tailed eagles are harvesting environmental energy.
@@ -844,6 +1376,8 @@ There are multiple different ways that we could associate climbing behaviour wit
 - Proportion of time spent soaring in that cell, compared to the total proportion of time spent in that cell
 - Average positive vertical rate (of the soaring behaviour only)
 - Maximum positive vertical rate (of the soaring behaviour only)
+
+For now, we'll take the soaring bouts, with individual soaring bouts = 1, and non-soaring bouts = 0, and model the probability of soaring in a cell as a function of the landscape variables. This is similar to @Scacco2019-si, but we are using the bouts rather than 15-second groups of fixes. 
 
 ```{r}
 

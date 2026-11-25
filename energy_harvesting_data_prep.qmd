@@ -928,7 +928,10 @@ raster_files <- c(elevation = "mapping/HS_DEM.tif",
                   tpi_300m = "mapping/TPI_300m.tif",
                   slope = "mapping/HS_Slope.tif",
                   ruggedness = "mapping/HS_Ruggedness.tif",
-                  aspect = "mapping/Aspect_degrees.tif")
+                  aspect = "mapping/Aspect_degrees.tif"
+                  # landcover = "mapping/HS_cover.tif",
+                  # landcover2 = "mapping/HS_cover2.tif"
+                  )
 
 # the area to crop to - the extent of all of the flight locations plus a buffer (m)
 buffer_m <- 2000
@@ -995,7 +998,7 @@ The total altitude gained while soaring in each hexagonal cell, summed over all 
 #| fig-height: 6
 
 # width of the hexagonal cells (m)
-hex_width_m <- 250
+hex_width_m <- 150
 
 ggplot() +
   geom_spatraster_contour(data = spatial_layers$elevation,
@@ -1045,9 +1048,6 @@ All of the flapping fixes that are in bouts of at least `min_bout_s`.
 #| fig-width: 8
 #| fig-height: 6
 
-# elevation contour interval (m)
-contour_m <- 10
-
 ggplot() +
   geom_spatraster_contour(data = spatial_layers$elevation,
                           breaks = seq(0, 2000, by = contour_m),
@@ -1067,9 +1067,6 @@ The total altitude gained while flapping in each hexagonal cell, summed over all
 ```{r}
 #| fig-width: 8
 #| fig-height: 6
-
-# width of the hexagonal cells (m)
-hex_width_m <- 250
 
 ggplot() +
   geom_spatraster_contour(data = spatial_layers$elevation,
@@ -1172,6 +1169,8 @@ Each fix is assigned to a cell by the location at the end of its step (the same 
 - The soaring time only includes the soaring fixes in bouts of at least `min_bout_s`, so the soaring fixes in shorter bouts count towards the flight time but not the soaring time.
 - The cells are combined across eagles. To calculate them separately for each eagle, add `name` to both `group_by()` calls (the maps would then need to be filtered to one eagle).
 
+## Behvaioural time in each cell
+
 ```{r}
 
 # size of the grid cells (m) - a multiple of the 30 m resolution of the spatial layers
@@ -1179,23 +1178,26 @@ cell_size_m <- 150
 
 # make the grid by combining the 30 m elevation cells into larger cells
 # (fact is the number of 30 m cells along each side of a larger cell)
-soaring_grid <- aggregate(spatial_layers$elevation,
+behaviour_grid <- aggregate(spatial_layers$elevation,
                           fact = cell_size_m / res(spatial_layers$elevation)[1])
 
-soaring_grid
+behaviour_grid
 
 # the grid cell that each fix is in (from the end location of each step)
 eagle_states <- eagle_states %>%
-  mutate(cell = cellFromXY(soaring_grid, cbind(stepend_utme, stepend_utmn)))
+  mutate(cell = cellFromXY(behaviour_grid, cbind(stepend_utme, stepend_utmn)))
 
 soaring_locations <- soaring_locations %>%
-  mutate(cell = cellFromXY(soaring_grid, cbind(stepend_utme, stepend_utmn)))
+  mutate(cell = cellFromXY(behaviour_grid, cbind(stepend_utme, stepend_utmn)))
+
+flapping_locations <- flapping_locations %>%
+  mutate(cell = cellFromXY(behaviour_grid, cbind(stepend_utme, stepend_utmn)))
 
 # check that all of the fixes are inside the grid (this should be 0)
 sum(is.na(eagle_states$cell))
 
 # flight time in each cell
-soaring_cells <- eagle_states %>%
+behaviour_cells <- eagle_states %>%
   group_by(cell) %>%
   summarise(n_fixes = n(),
             flight_s = sum(step_s)) %>%
@@ -1205,22 +1207,33 @@ soaring_cells <- eagle_states %>%
               summarise(n_soaring_fixes = n(),
                         soaring_s = sum(step_s)),
             by = "cell") %>%
+  # flapping time in each cell
+  left_join(flapping_locations %>%
+              group_by(cell) %>%
+              summarise(n_flapping_fixes = n(),
+                        flapping_s = sum(step_s)),
+            by = "cell") %>%
   mutate(
     # cells with flight but no soaring have 0 soaring time
     across(c(n_soaring_fixes, soaring_s), \(x) replace_na(x, 0)),
+    across(c(n_flapping_fixes, flapping_s), \(x) replace_na(x, 0)),
     prop_soaring = soaring_s / flight_s,
+    prop_flapping = flapping_s / flight_s,
     # the coordinates of the centre of each cell
-    x = xFromCell(soaring_grid, cell),
-    y = yFromCell(soaring_grid, cell)
+    x = xFromCell(behaviour_grid, cell),
+    y = yFromCell(behaviour_grid, cell)
   )
 
-soaring_cells
+behaviour_cells
 
 # number of cells with flight, and the number of those with some soaring
-nrow(soaring_cells)
-sum(soaring_cells$soaring_s > 0)
+nrow(behaviour_cells)
+sum(behaviour_cells$soaring_s > 0)
+sum(behaviour_cells$flapping_s > 0)
 
 ```
+
+## Total flight time
 
 The flight time in each cell (on a log scale), which shows how much data there is for calculating the proportion of time soaring.
 
@@ -1229,7 +1242,7 @@ The flight time in each cell (on a log scale), which shows how much data there i
 #| fig-height: 6
 
 ggplot() +
-  geom_tile(data = soaring_cells,
+  geom_tile(data = behaviour_cells,
             aes(x = x, y = y, fill = flight_s / 60),
             width = cell_size_m, height = cell_size_m) +
   geom_spatraster_contour(data = spatial_layers$elevation,
@@ -1241,6 +1254,10 @@ ggplot() +
 
 ```
 
+::: {.panel-tabset}
+
+## Soaring time
+
 The soaring time in each cell (on a log scale).
 
 ```{r}
@@ -1248,7 +1265,7 @@ The soaring time in each cell (on a log scale).
 #| fig-height: 6
 
 ggplot() +
-  geom_tile(data = soaring_cells,
+  geom_tile(data = behaviour_cells,
             aes(x = x, y = y, fill = soaring_s / 60),
             width = cell_size_m, height = cell_size_m) +
   geom_spatraster_contour(data = spatial_layers$elevation,
@@ -1260,6 +1277,29 @@ ggplot() +
 
 ```
 
+## Flapping time
+
+The flapping time in each cell (on a log scale).
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+ggplot() +
+  geom_tile(data = behaviour_cells,
+            aes(x = x, y = y, fill = flapping_s / 60),
+            width = cell_size_m, height = cell_size_m) +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "white", linewidth = 0.2) +
+  scale_fill_viridis_c(trans = "log10", labels = scales::label_comma()) +
+  labs(x = NULL, y = NULL, fill = "Flapping time\n(minutes)") +
+  theme_bw()
+
+```
+
+## Proprtion soaring
+
 The proportion of the flight time spent soaring in each cell. Cells with only a few fixes can only have a few values (e.g. a cell with 1 fix is either 0 or 1), so we only show the cells with at least `min_cell_fixes` fixes (the other cells are still in `soaring_cells`).
 
 ```{r}
@@ -1270,7 +1310,7 @@ The proportion of the flight time spent soaring in each cell. Cells with only a 
 min_cell_fixes <- 10
 
 ggplot() +
-  geom_tile(data = soaring_cells %>% filter(n_fixes >= min_cell_fixes),
+  geom_tile(data = behaviour_cells %>% filter(n_fixes >= min_cell_fixes),
             aes(x = x, y = y, fill = prop_soaring),
             width = cell_size_m, height = cell_size_m) +
   geom_spatraster_contour(data = spatial_layers$elevation,
@@ -1281,7 +1321,7 @@ ggplot() +
   theme_bw()
 
 # distribution of the proportion of time soaring across the cells
-soaring_cells %>%
+behaviour_cells %>%
   filter(n_fixes >= min_cell_fixes) %>%
   ggplot() +
   geom_histogram(aes(x = prop_soaring), bins = 50) +
@@ -1289,6 +1329,40 @@ soaring_cells %>%
   theme_bw()
 
 ```
+
+## Proportion flapping
+
+The proportion of the flight time spent flapping in each cell. Cells with only a few fixes can only have a few values (e.g. a cell with 1 fix is either 0 or 1), so we only show the cells with at least `min_cell_fixes` fixes (the other cells are still in `flapping_cells`).
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+# the minimum number of fixes in a cell to show it in the map
+min_cell_fixes <- 10
+
+ggplot() +
+  geom_tile(data = behaviour_cells %>% filter(n_fixes >= min_cell_fixes),
+            aes(x = x, y = y, fill = prop_flapping),
+            width = cell_size_m, height = cell_size_m) +
+  geom_spatraster_contour(data = spatial_layers$elevation,
+                          breaks = seq(0, 2000, by = contour_m),
+                          colour = "white", linewidth = 0.2) +
+  scale_fill_viridis_c(limits = c(0, 1)) +
+  labs(x = NULL, y = NULL, fill = "Proportion\nof time\nflapping") +
+  theme_bw()
+
+# distribution of the proportion of time flapping across the cells
+behaviour_cells %>%
+  filter(n_fixes >= min_cell_fixes) %>%
+  ggplot() +
+  geom_histogram(aes(x = prop_flapping), bins = 50) +
+  labs(x = "Proportion of time flapping in the cell", y = "Number of cells") +
+  theme_bw()
+
+```
+
+:::
 
 ## Prevalence of soaring
 
@@ -1300,11 +1374,127 @@ There are multiple different ways that we could associate climbing behaviour wit
 - Average positive vertical rate (of the soaring behaviour only)
 - Maximum positive vertical rate (of the soaring behaviour only)
 
-For now, we'll take the soaring bouts, with individual soaring bouts = 1, and non-soaring bouts = 0, and model the probability of soaring in a cell as a function of the landscape variables. This is similar to @Scacco2019-si, but we are using the bouts rather than 15-second groups of fixes. 
+For now, we'll take the soaring and flapping bouts as the individual samples, with individual soaring bouts = 1, and flapping bouts = 0. This is similar to @Scacco2019-si, but we are using the bouts rather than 15-second groups of fixes. 
+
+### Join the bout dataframes together
 
 ```{r}
 
+# join the soaring and flapping bouts, with a 'behaviour' column for which
+# dataframe each bout came from, and the response (soaring = 1, flapping = 0)
+combined_bouts <- bind_rows(soaring = soaring_bouts,
+                            flapping = flapping_bouts,
+                            .id = "behaviour") %>%
+  mutate(soaring = if_else(behaviour == "soaring", 1, 0))
 
+# number of soaring and flapping bouts
+combined_bouts %>% count(behaviour, soaring)
+
+```
+
+### Add environmental variables
+
+We extract the value of each spatial layer at the start location of each bout (`utme` and `utmn`, which are in GDA94 / MGA zone 55). Each bout gets the value of the 30 m cell that its start location falls in.
+
+Some of the rasters are in a slightly different crs (e.g. the slope and aspect layers), so the start locations are projected to the crs of each raster before extracting, in the same way as when cropping the rasters above.
+
+We use `terra::extract()` rather than `extract()`, as the tidyverse (tidyr) also has an `extract()` function.
+
+Aspect is circular (0° and 359° are both north-facing), so we also convert it to:
+
+- `northness` - the cosine of aspect, from 1 (north-facing) to -1 (south-facing)
+- `eastness` - the sine of aspect, from 1 (east-facing) to -1 (west-facing)
+
+Flat cells have an aspect of -1, so they are given a northness and eastness of 0.
+
+```{r}
+
+# the start location of each bout as spatial points
+bout_points <- vect(cbind(combined_bouts$utme, combined_bouts$utmn),
+                    crs = "EPSG:28355")
+
+# extract the value of each spatial layer at the start location of each bout.
+# This gives a list with one vector for each layer, which we turn into a
+# dataframe with one column for each layer (named as in raster_files)
+bout_env <- map(spatial_layers, \(r) {
+  # project the points to the crs of the raster
+  points_r <- project(bout_points, crs(r))
+  # extract the values (ID = FALSE drops the ID column, and [[1]] takes the
+  # values as a vector)
+  terra::extract(r, points_r, ID = FALSE)[[1]]
+}) %>%
+  as_tibble()
+
+# add the extracted values to the bouts (the rows are in the same order)
+combined_bouts <- bind_cols(combined_bouts, bout_env)
+
+# convert aspect to northness and eastness (flat cells, with an aspect of -1, are 0)
+combined_bouts <- combined_bouts %>%
+  mutate(northness = if_else(aspect == -1, 0, cos(aspect * pi / 180)),
+         eastness = if_else(aspect == -1, 0, sin(aspect * pi / 180)))
+
+# number of bouts with missing values for each layer (e.g. bouts that started
+# over the sea, which is NA in the rasters)
+combined_bouts %>%
+  summarise(across(c(names(raster_files), northness, eastness), \(x) sum(is.na(x))))
+
+combined_bouts %>%
+  select(bout_id, behaviour, soaring, utme, utmn,
+         all_of(names(raster_files)), northness, eastness)
+
+```
+
+### Plot the bout locations
+
+The start location of each bout, coloured by the behaviour and by each of the environmental variables (one tab for each). Bouts with a missing value (e.g. over the sea) are shown in grey.
+
+```{r}
+#| results: asis
+#| fig-width: 8
+#| fig-height: 6
+
+plotting_variables <- c("behaviour", "elevation", "slope", "ruggedness", "tpi_300m", "northness", "eastness")
+
+cat("::: {.panel-tabset}\n\n")
+
+for (variable in plotting_variables) {
+
+  p <- combined_bouts %>%
+    # shuffle the rows, so the flapping bouts (which are after the soaring
+    # bouts in the dataframe) aren't all plotted on top of the soaring bouts
+    slice_sample(prop = 1) %>%
+    ggplot() +
+    geom_point(aes(x = utme, y = utmn, colour = .data[[variable]]),
+               alpha = 0.5, size = 1) +
+    coord_equal() +
+    labs(colour = variable) +
+    ggtitle(variable) +
+    theme_bw()
+
+  # behaviour is categorical, so it gets the same colours as the plots above,
+  # and the environmental variables are continuous
+  if (variable == "behaviour") {
+    p <- p + scale_colour_manual(values = c(soaring = state_colours[["ascending"]],
+                                            flapping = state_colours[["flapping"]]))
+  } else {
+    p <- p + scale_colour_viridis_c(na.value = "grey70")
+  }
+
+  # one tab per variable: heading first, then the plot
+  cat("\n\n#### ", variable, "\n\n")
+  print(p)
+
+}
+
+cat("\n\n:::\n")
+
+```
+
+### Write bout data to CSV
+
+```{r}
+
+write_csv(combined_bouts, "outputs/combined_bouts_consensus.csv")
 
 ```
 

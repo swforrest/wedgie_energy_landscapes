@@ -2,7 +2,7 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
     <loc>https://swforrest.github.io/wedgie_modelling/index.html</loc>
-    <lastmod>2026-11-24T16:36:43.417Z</lastmod>
+    <lastmod>2026-11-25T12:05:06.431Z</lastmod>
   </url>
   <url>
     <loc>https://swforrest.github.io/wedgie_modelling/classification_kmeans_instantaneous.html</loc>
@@ -10,11 +10,11 @@
   </url>
   <url>
     <loc>https://swforrest.github.io/wedgie_modelling/classification_kmeans_aggregated.html</loc>
-    <lastmod>2026-11-24T14:48:25.320Z</lastmod>
+    <lastmod>2026-11-25T10:09:25.353Z</lastmod>
   </url>
   <url>
     <loc>https://swforrest.github.io/wedgie_modelling/classification_agreement.html</loc>
-    <lastmod>2026-11-24T13:31:47.536Z</lastmod>
+    <lastmod>2026-11-25T10:19:47.469Z</lastmod>
   </url>
   <url>
     <loc>https://swforrest.github.io/wedgie_modelling/classification_EMbC_aggregated.html</loc>
@@ -29,7 +29,7 @@
     <lastmod>2026-11-24T14:47:56.830Z</lastmod>
   </url>
   <url>
-    <loc>https://swforrest.github.io/wedgie_modelling/energy_harvesting.html</loc>
-    <lastmod>2026-11-24T16:47:25.622Z</lastmod>
+    <loc>https://swforrest.github.io/wedgie_modelling/energy_harvesting_data_prep.html</loc>
+    <lastmod>2026-11-25T14:12:56.241Z</lastmod>
   </url>
 </urlset>

@@ -45,12 +45,12 @@ website:
         # items with only 'text' are section headers, and "---" is a divider line
         - text: "Data"
         - href: energy_harvesting_data_prep.qmd
-          text: "Soaring Bouts and Energy Harvesting Data"
-        # uncomment and fill in as the model and prediction scripts are added
-        # - text: "---"
-        # - text: "Models"
-        # - href: energy_landscape_models.qmd
-        #   text: "Energy Landscape Models"
+          text: "Preparing Behavioural Bouts"
+        - text: "---"
+        - text: "Models"
+        - href: energy_harvesting_random_forest.qmd
+          text: "Random Forest"
+        # uncomment and fill in as the prediction scripts are added
         # - text: "---"
         # - text: "Predictions"
         # - href: energy_landscape_predictions.qmd

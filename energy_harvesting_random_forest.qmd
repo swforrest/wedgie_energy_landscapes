@@ -1,0 +1,186 @@
+---
+title: "Wedge-tailed eagle energy harvesting"
+subtitle: "Fitting behavioural bouts to landscape features - Random Forest"
+author:
+  - name: "Scott Forrest"
+    url: https://swforrest.github.io/
+    orcid: 0000-0001-9529-0108
+    affiliation: University of Tasmania, QUT
+    email: "scottwforrest@gmail.com"
+  - name: "James Pay"
+    affiliation: University of Tasmania
+date: "`r Sys.Date()`"
+execute:
+  cache: false
+  warning: false
+bibliography: references.bib
+toc: true
+number-sections: false
+format:
+  html:
+    # self-contained: true
+    code-fold: true
+    code-summary: "Show code"
+    code-tools: true
+    df-print: paged
+    code-line-numbers: true
+    code-overflow: scroll
+    fig-format: png
+    fig-dpi: 150
+editor:
+  source
+editor_options:
+  chunk_output_type: inline
+abstract: |
+  Here we use the behavioural states estimated by the classification methods to identify where and when wedge-tailed eagles 'harvest' environmental energy by soaring. We are now associated the soaring bouts (with flapping bouts as the negative samples) to time variables and static landscape features such as topography.
+---
+
+# Load packages
+
+```{r}
+
+library(tidyverse)
+packages <- c("leaflet", "terra", "tidyterra")
+walk(packages, require, character.only = T)
+
+```
+
+# Import data from `energy_harvesting_data_prep.qmd`
+
+```{r}
+
+combined_bouts <- read_csv("outputs/combined_bouts_consensus.csv")
+
+```
+
+## Spatial layers
+
+We read in the spatial layers and crop them to the area around all of the flight locations (plus a buffer), so they are quick to plot. Add any other rasters to `raster_files` to include them in the leaflet map below - the names are used as the layer names in the map.
+
+The rasters are at 30 m resolution. If the soaring locations cover a large area (e.g. when using all eagles), uncomment the `aggregate()` line to use a coarser resolution, otherwise the maps will be slow and the leaflet map may hit its size limit.
+
+```{r}
+
+# the spatial layers to crop (and add to the leaflet map)
+raster_files <- c(elevation = "mapping/HS_DEM.tif",
+                  tpi_300m = "mapping/TPI_300m.tif",
+                  slope = "mapping/HS_Slope.tif",
+                  ruggedness = "mapping/HS_Ruggedness.tif",
+                  aspect = "mapping/Aspect_degrees.tif"
+                  # landcover = "mapping/HS_cover.tif",
+                  # landcover2 = "mapping/HS_cover2.tif"
+                  )
+
+# the area to crop to - the extent of all of the flight locations plus a buffer (m)
+buffer_m <- 2000
+
+crop_area <- ext(min(combined_bouts$utme) - buffer_m,
+                 max(combined_bouts$utme) + buffer_m,
+                 min(combined_bouts$utmn) - buffer_m,
+                 max(combined_bouts$utmn) + buffer_m) %>%
+  # the eagle locations are in GDA94 / MGA zone 55
+  vect(crs = "EPSG:28355")
+
+# read in and crop each raster (the crop area is projected to the crs of each
+# raster, in case some are in a different crs)
+spatial_layers <- map(raster_files, \(f) {
+  r <- rast(f)
+  r <- crop(r, project(crop_area, crs(r)))
+  # r <- aggregate(r, fact = 5) # 5 x 5 cells, i.e. 150 m resolution
+  r
+})
+
+spatial_layers
+
+```
+
+# Create interactive map of bouts
+
+The start location of each soaring and flapping bout over a satellite (or topographic) basemap. The soaring and flapping bouts are separate layers, so either can be switched off in the layer control (top right) to see the other more clearly. The soaring bouts are drawn on top of the flapping bouts.
+
+Hover over a bout to see its details and the values of the environmental variables at its start location (the values used in the model). The spatial layers are added as greyscale overlays that can be switched on in the layer control - they are hidden when the map loads.
+
+The times are read in from the csv as UTC, so they are converted back to local Tasmanian time for the labels.
+
+```{r}
+
+# colours for each behaviour (the same as in the other scripts)
+behaviour_colours <- c(soaring = "#E69F00", flapping = "#56B4E9")
+
+# local time zone (Tasmania)
+local_tz <- "Australia/Hobart"
+
+# the environmental variables to show in the hover labels (the spatial layers,
+# plus northness and eastness, that are also columns in combined_bouts)
+label_vars <- intersect(c(names(raster_files), "northness", "eastness"),
+                        names(combined_bouts))
+
+# hover labels for each bout. We add these to a copy of combined_bouts, so that
+# the label column doesn't end up in the data used for the model
+map_bouts <- combined_bouts %>%
+  mutate(label = paste0("<b>", bout_id, "</b><br>",
+                        format(with_tz(start, local_tz), "%Y-%m-%d %H:%M"), "<br>",
+                        "Duration: ", round(duration_s / 60, 1), " min<br>",
+                        "Altitude gained: ", round(alt_gain_m), " m<br>",
+                        "Mean vertical rate: ", round(mean_Vrate, 2), " m/s<br>"))
+
+# add a line to the label for each environmental variable
+for (v in label_vars) {
+  map_bouts <- map_bouts %>%
+    mutate(label = paste0(label, "<br>", v, ": ", round(.data[[v]], 2)))
+}
+
+# basemaps
+bout_map <- leaflet(height = 650, width = "100%",
+                    options = leafletOptions(preferCanvas = TRUE)) %>%
+  addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
+  addProviderTiles(providers$OpenTopoMap, group = "Topographic")
+
+# add each spatial layer (in greyscale, so the bouts stand out), with its own legend
+for (layer in names(spatial_layers)) {
+
+  r <- spatial_layers[[layer]]
+  layer_palette <- colorNumeric("Greys", domain = range(values(r), na.rm = TRUE),
+                                na.color = "transparent", reverse = TRUE)
+
+  bout_map <- bout_map %>%
+    addRasterImage(r, colors = layer_palette, opacity = 0.8, group = layer) %>%
+    addLegend(position = "bottomleft", pal = layer_palette,
+              values = range(values(r), na.rm = TRUE), title = layer, group = layer)
+}
+
+bout_map %>%
+  # flapping bouts first, so the soaring bouts are drawn on top
+  addCircleMarkers(data = map_bouts %>% filter(behaviour == "flapping"),
+                   lng = ~lon, lat = ~lat, radius = 4, stroke = FALSE,
+                   fillColor = behaviour_colours[["flapping"]], fillOpacity = 0.8,
+                   label = ~map(label, htmltools::HTML),
+                   group = "Flapping bouts") %>%
+  addCircleMarkers(data = map_bouts %>% filter(behaviour == "soaring"),
+                   lng = ~lon, lat = ~lat, radius = 4, stroke = FALSE,
+                   fillColor = behaviour_colours[["soaring"]], fillOpacity = 0.8,
+                   label = ~map(label, htmltools::HTML),
+                   group = "Soaring bouts") %>%
+  addLegend(position = "bottomright", colors = behaviour_colours,
+            labels = names(behaviour_colours), title = "Behaviour") %>%
+  addLayersControl(baseGroups = c("Satellite", "Topographic"),
+                   overlayGroups = c(names(spatial_layers), "Soaring bouts", "Flapping bouts"),
+                   options = layersControlOptions(collapsed = FALSE)) %>%
+  # hide the spatial layers when the map loads
+  hideGroup(names(spatial_layers)) %>%
+  addScaleBar(position = "bottomleft")
+
+```
+
+# References
+
+::: {#refs}
+:::
+
+# Session Information
+
+```{r}
+
+utils::sessionInfo()
+
+```

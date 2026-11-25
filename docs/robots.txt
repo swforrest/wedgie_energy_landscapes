@@ -1,1 +1,1 @@
-Sitemap: https://swforrest.github.io/wedgie_modelling/sitemap.xml
+Sitemap: https://swforrest.github.io/wedgie_energy_landscapes/sitemap.xml

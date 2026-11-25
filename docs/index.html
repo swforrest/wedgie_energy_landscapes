@@ -23,7 +23,26 @@ ul.task-list li input[type="checkbox"] {
   margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
   vertical-align: middle;
 }
-</style>
+/* CSS for citations */
+div.csl-bib-body { }
+div.csl-entry {
+  clear: both;
+}
+.hanging-indent div.csl-entry {
+  margin-left:2em;
+  text-indent:-2em;
+}
+div.csl-left-margin {
+  min-width:2em;
+  float:left;
+}
+div.csl-right-inline {
+  margin-left:2em;
+  padding-left:1em;
+}
+div.csl-indent {
+  margin-left: 2em;
+}</style>
 
 
 <script src="site_libs/quarto-nav/quarto-nav.js"></script>
@@ -301,14 +320,24 @@ ul.task-list li input[type="checkbox"] {
         <li class="dropdown-header">Data</li>
         <li>
     <a class="dropdown-item" href="./energy_harvesting_data_prep.html">
- <span class="dropdown-text">Soaring Bouts and Energy Harvesting Data</span></a>
+ <span class="dropdown-text">Preparing Behavioural Bouts</span></a>
+  </li>  
+        <li><hr class="dropdown-divider"></li>
+        <li class="dropdown-header">Models</li>
+        <li>
+    <a class="dropdown-item" href="./energy_harvesting_random_forest.html">
+ <span class="dropdown-text">Random Forest</span></a>
+  </li>  
+        <li>
+    <a class="dropdown-item" href="./energy_harvesting_XGBoost.html">
+ <span class="dropdown-text">XGBoost</span></a>
   </li>  
     </ul>
   </li>
 </ul>
             <ul class="navbar-nav navbar-nav-scroll ms-auto">
   <li class="nav-item compact">
-    <a class="nav-link" href="https://github.com/swforrest/wedgie_modelling"> <i class="bi bi-github" role="img" aria-label="GitHub">
+    <a class="nav-link" href="https://github.com/swforrest/wedgie_energy_landscapes"> <i class="bi bi-github" role="img" aria-label="GitHub">
 </i> 
 <span class="menu-text"></span></a>
   </li>  
@@ -350,15 +379,17 @@ ul.task-list li input[type="checkbox"] {
 
 
 <p>This site collects the analysis notebooks for modelling the flight behaviour of GPS-tracked wedge-tailed eagles (<em>Aquila audax fleayi</em>) in Tasmania.</p>
+<p>The notebooks currently show the results for one eagle (Tabatha). The eagle is chosen at the top of each notebook (<code>which_data</code> in the classification notebooks, and <code>eagle_name</code> in the others).</p>
 <section id="behaviour-classification" class="level2">
 <h2 class="anchored" data-anchor-id="behaviour-classification">Behaviour classification</h2>
+<p>Each classification notebook labels the states of its 3-state model as ascending (soaring), flapping or gliding, and saves them (in the <code>behavior</code> column of its output) for the agreement and energy landscape notebooks.</p>
 <ul>
-<li><a href="./classification_kmeans_instantaneous.html">K-means Instantaneous Variable</a>: using variables calculated for each GPS fix to estimate behavioural states.</li>
-<li><a href="./classification_kmeans_aggregated.html">K-means Aggregated Variables</a>: using variables that aggregate over a moving window (such as cumulative turning angles or average speed) to estimate behavioural states. This approach helps to smooth over jumpy states when using k-means, which treats each each sample independently.</li>
+<li><a href="./classification_kmeans_instantaneous.html">K-means Instantaneous Variables</a>: using variables calculated for each GPS fix to estimate behavioural states.</li>
+<li><a href="./classification_kmeans_aggregated.html">K-means Aggregated Variables</a>: using variables that aggregate over a moving window (such as cumulative turning angles or average speed) to estimate behavioural states. This approach helps to smooth over jumpy states when using k-means, which treats each sample independently.</li>
 <li><a href="./classification_kmeans_combined.html">K-means Combined Variables</a>: using both instantaneous and aggregated variables to estimate behavioural states.</li>
 <li><a href="./classification_hmm.html">Hidden Markov Model</a>: using a Hidden Markov Model to estimate behavioural states based on the observed GPS data.</li>
-<li><a href="./classification_EMbC_aggregated.html">EMbC Aggregated Variables</a>: using expectation-maximisation binary clustering (EMbC) on the absolute cumulative turning angle and mean vertical rate over a moving window, following Scacco et al.&nbsp;(2019). The vertical rate split is fixed at 0 to separate gliding from soaring and flapping, and the states are smoothed after classification.</li>
-<li><a href="./classification_agreement.html">Agreement Between Methods</a>: comparing the states from the 3-state k-means, HMM and EMbC classifications.</li>
+<li><a href="./classification_EMbC_aggregated.html">EMbC Aggregated Variables</a>: using expectation-maximisation binary clustering (EMbC) on the absolute cumulative turning angle and mean vertical rate over a moving window, following <span class="citation" data-cites="Scacco2019-si">Scacco et al. (<a href="#ref-Scacco2019-si" role="doc-biblioref">2019</a>)</span>. The vertical rate split is fixed at 0 to separate gliding from soaring and flapping, and the states are smoothed after classification.</li>
+<li><a href="./classification_agreement.html">Agreement Between Methods</a>: comparing the states from the 3-state k-means, HMM and EMbC classifications, and finding the consensus state at each fix (the state that more than half of the methods agree on). The methods to include can be switched on and off at the top of the notebook.</li>
 </ul>
 </section>
 <section id="modelling-the-energy-landscape" class="level2">
@@ -367,22 +398,33 @@ ul.task-list li input[type="checkbox"] {
 <section id="data" class="level3">
 <h3 class="anchored" data-anchor-id="data">Data</h3>
 <ul>
-<li><a href="./energy_harvesting_data_prep.html">Soaring Bouts and Energy Harvesting Data</a>: selecting the fixes that most of the classification methods agree are soaring (ascending), splitting them into soaring bouts, and summarising when and where the eagles soar and how much altitude they gain. This creates the data that will be used to associate soaring with landscape variables (such as elevation, topographic position and ridges), but doesn’t do the modelling itself.</li>
+<li><a href="./energy_harvesting_data_prep.html">Soaring Bouts and Energy Harvesting Data</a>: selecting the fixes that most of the classification methods agree are soaring (ascending) or flapping (the methods included in the consensus can be switched on and off at the top of the notebook), splitting them into bouts, and summarising when and where the eagles soar and how much altitude they gain. This creates the data that will be used to associate soaring with landscape variables (such as elevation, topographic position and ridges), but doesn’t do the modelling itself.</li>
 </ul>
-<!-- Uncomment and fill in as the model and prediction scripts are added (and add them to the navbar in _quarto.yml)
-
-### Models
-
-- [Energy Landscape Models](energy_landscape_models.qmd):
+</section>
+<section id="models" class="level3">
+<h3 class="anchored" data-anchor-id="models">Models</h3>
+<ul>
+<li><a href="./energy_harvesting_random_forest.html">Random Forest</a>: associating the soaring bouts (with the flapping bouts as the negative samples, following <span class="citation" data-cites="Scacco2019-si">Scacco et al. (<a href="#ref-Scacco2019-si" role="doc-biblioref">2019</a>)</span>) with time variables and static landscape features such as topography, using a random forest. The environmental variables are the values at the start location of each bout, from the data prepared in the notebook above.</li>
+<li><a href="./energy_harvesting_XGBoost.html">XGBoost</a>: the same analysis using gradient boosted trees (XGBoost) instead of a random forest, with the same data and cross-validation folds so the two methods can be compared directly. Also uses SHAP values to look at how each variable affects each bout, and whether the effects of the landscape change with the time of day or year.</li>
+</ul>
+<!-- Uncomment and fill in as the prediction scripts are added (and add them to the navbar in _quarto.yml)
 
 ### Predictions
 
 - [Energy Landscape Predictions](energy_landscape_predictions.qmd):
 
 -->
-
-
 </section>
+</section>
+<section id="references" class="level2">
+<h2 class="anchored" data-anchor-id="references">References</h2>
+<div id="refs" class="references csl-bib-body hanging-indent" role="list">
+<div id="ref-Scacco2019-si" class="csl-entry" role="listitem">
+Scacco, Martina, Andrea Flack, Olivier Duriez, Martin Wikelski, and Kamran Safi. 2019. <span>“<span class="nocase">Static landscape features predict uplift locations for soaring birds across Europe</span>.”</span> <em>Royal Society Open Science</em> 6 (January): 181440. <a href="https://doi.org/10.1098/rsos.181440">https://doi.org/10.1098/rsos.181440</a>.
+</div>
+</div>
+
+
 </section>
 
 </main> <!-- /main -->
@@ -472,7 +514,7 @@ ul.task-list li input[type="checkbox"] {
     }
       var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
       var mailtoRegex = new RegExp(/^mailto:/);
-        var filterRegex = new RegExp("https:\/\/swforrest\.github\.io\/wedgie_modelling\/");
+        var filterRegex = new RegExp("https:\/\/swforrest\.github\.io\/wedgie_energy_landscapes\/");
       var isInternal = (href) => {
           return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
       }
@@ -807,7 +849,7 @@ ul.task-list li input[type="checkbox"] {
 </div>   
     <div class="nav-footer-center">
       &nbsp;
-    <div class="toc-actions"><ul><li><a href="https://github.com/swforrest/wedgie_modelling/blob/main/index.qmd" class="toc-action"><i class="bi bi-github"></i>View source</a></li></ul></div></div>
+    <div class="toc-actions"><ul><li><a href="https://github.com/swforrest/wedgie_energy_landscapes/blob/main/index.qmd" class="toc-action"><i class="bi bi-github"></i>View source</a></li></ul></div></div>
     <div class="nav-footer-right">
 <p>Built with <a href="https://quarto.org/">Quarto</a></p>
 </div>

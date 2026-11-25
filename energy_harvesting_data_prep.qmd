@@ -45,117 +45,133 @@ walk(packages, require, character.only = T)
 
 ```
 
+# Choose the methods for the consensus
+
+Set a method to `FALSE` to leave it out of the agreement and consensus (and so out of the selection of the soaring and flapping fixes). Nothing else in the notebook needs to change - the agreement categories and the majority needed for a consensus are worked out from the number of methods that are included.
+
+```{r}
+
+# the classification methods - TRUE to include, FALSE to leave out
+include_methods <- c(kmeans_inst = TRUE,
+                     kmeans_agg = TRUE,
+                     kmeans_comb = TRUE,
+                     hmm = TRUE,
+                     embc = TRUE)
+
+# the names of the state columns of the included methods
+state_cols <- names(include_methods)[include_methods]
+
+# the number of methods, and how many need to agree for a majority (more than half)
+n_methods <- length(state_cols)
+n_majority <- floor(n_methods / 2) + 1
+
+n_methods
+n_majority
+
+```
+
 # Import data from the model outputs
 
 ```{r}
 
-kmeans_instantaneous <- read_csv("outputs/eagle_states_kmeans_instantaneous_Stella.csv")
-kmeans_aggregated <- read_csv("outputs/eagle_states_kmeans_aggregated_Stella.csv")
-kmeans_combined <- read_csv("outputs/eagle_states_kmeans_combined_Stella.csv")
-hmm <- read_csv("outputs/eagle_states_hmm_Stella.csv")
+eagle_name <- "Tabatha"
+
+kmeans_instantaneous <- read_csv(paste0("outputs/eagle_states_kmeans_instantaneous_", eagle_name, ".csv"))
+kmeans_aggregated <- read_csv(paste0("outputs/eagle_states_kmeans_aggregated_", eagle_name, ".csv"))
+kmeans_combined <- read_csv(paste0("outputs/eagle_states_kmeans_combined_", eagle_name, ".csv"))
+hmm <- read_csv(paste0("outputs/eagle_states_hmm_", eagle_name, ".csv"))
+embc <- read_csv(paste0("outputs/eagle_states_embc_aggregated_", eagle_name, ".csv"))
 
 ```
 
 ## Join the dataframes
 
-The dataframes have different numbers of rows, as some variables had NAs in some of the scripts but not others. We join them by the eagle's name and the start time of each step, and then only keep the fixes that were classified by all four methods.
+The dataframes have different numbers of rows, as some variables had NAs in some of the scripts but not others. We join them by the eagle's name and the start time of each step, and then only keep the fixes that were classified by all of the included methods.
 
-We keep the location and flight variables from the k-means instantaneous data, and only the 3-state classifications from the others (plus the probability of the most likely state from the 3-state HMM).
+We keep the location and flight variables from the k-means combined data, and only the behaviours from the others (plus the probability of the most likely state from the 3-state HMM). The behaviours are labelled in each classification script and saved in the `behavior` column - from the 3-cluster k-means models, the 3-state HMM and the smoothed EMbC behaviours.
 
 ```{r}
 
 # number of rows in each dataframe
-tibble(data = c("kmeans_instantaneous", "kmeans_aggregated", "kmeans_combined", "hmm"),
+tibble(data = c("kmeans_instantaneous", "kmeans_aggregated", "kmeans_combined", "hmm", "embc"),
        rows = c(nrow(kmeans_instantaneous), nrow(kmeans_aggregated),
-                nrow(kmeans_combined), nrow(hmm)))
+                nrow(kmeans_combined), nrow(hmm), nrow(embc)))
 
 eagle_states <- kmeans_combined %>%
-  select(name, stepstart_dtime, stepend_dtime, 
+  select(name, stepstart_dtime, stepend_dtime,
          stepend_utme, stepend_utmn,
          flight_n, lat, lon,
-         F_AOG, F_Sn, F_Vrate, F_radians, F_radians_abs, 
+         F_AOG, F_Sn, F_Vrate, F_radians, F_radians_abs,
          F_turn_cum_window, F_speed_mean_window, F_Vrate_mean_window,
-         kmeans_comb = k3) %>%
-  full_join(kmeans_aggregated %>% select(name, stepstart_dtime, kmeans_agg = k3),
+         kmeans_comb = behavior) %>%
+  full_join(kmeans_aggregated %>% select(name, stepstart_dtime, kmeans_agg = behavior),
             by = c("name", "stepstart_dtime")) %>%
-  full_join(kmeans_instantaneous %>% select(name, stepstart_dtime, kmeans_inst = k3),
+  full_join(kmeans_instantaneous %>% select(name, stepstart_dtime, kmeans_inst = behavior),
             by = c("name", "stepstart_dtime")) %>%
-  full_join(hmm %>% select(name, stepstart_dtime, hmm = hmm3, hmm3_prob),
+  full_join(hmm %>% select(name, stepstart_dtime, hmm = behavior, hmm3_prob),
+            by = c("name", "stepstart_dtime")) %>%
+  full_join(embc %>% select(name, stepstart_dtime, embc = behavior),
             by = c("name", "stepstart_dtime"))
 
 # number of rows after joining
 nrow(eagle_states)
 
-# drop rows that are missing a state from any of the methods
+# drop rows that are missing a state from any of the included methods, or the
+# locations (which come from the k-means combined data)
 eagle_states <- eagle_states %>%
-  drop_na(kmeans_inst, kmeans_agg, kmeans_comb, hmm)
+  drop_na(all_of(state_cols), lat, lon)
 
-# number of rows that were classified by all four methods
+# number of rows that were classified by all of the included methods
 nrow(eagle_states)
 
 ```
 
-## Label the states
+## Labels and colours
 
-The cluster (k-means) and state (HMM) numbers are arbitrary, so state 1 in one method isn't necessarily state 1 in another. Here we assign the same behaviour labels that were given to the 3-state models in each of the classification scripts.
-
-Note that these need to match the labels in the classification scripts - if the models are re-run and the numbers change, update them here as well.
+The cluster (k-means) and state (HMM) numbers are arbitrary, so state 1 in one method isn't necessarily state 1 in another. The behaviours are therefore labelled in each of the classification scripts (where the clusters and states can be checked against the flight variables), and we use those labels here.
 
 ```{r}
 
-# the names of the state columns, and labels to use in the plots
-state_cols <- c("kmeans_inst", "kmeans_agg", "kmeans_comb", "hmm")
-
+# labels to use in the plots
 method_labels <- c(kmeans_inst = "K-means instantaneous",
                    kmeans_agg = "K-means aggregated",
                    kmeans_comb = "K-means combined",
-                   hmm = "HMM instantaneous")
+                   hmm = "HMM instantaneous",
+                   embc = "EMbC aggregated")
+
+# only keep the labels of the included methods
+method_labels <- method_labels[state_cols]
 
 # colours that are used in all of the plots and the map
 state_colours <- c(ascending = "#E69F00", flapping = "#56B4E9", gliding = "#009E73")
 
-# the consensus state can also be 'no majority' (when fewer than 3 methods agree)
+# the consensus state can also be 'no majority' (when no state has a majority)
 # consensus_colours <- c(state_colours, "no majority" = "#999999")
 consensus_colours <- c(state_colours, "no majority" = "red")
 
-agreement_colours <- c("all 4 agree" = "#0072B2",
-                       "3 of 4 agree" = "#F0E442",
-                       "no majority" = "#D55E00")
+# the agreement categories go from all of the methods agreeing down to a bare
+# majority, and then 'no majority' (e.g. with 5 methods: "5 of 5 agree",
+# "4 of 5 agree", "3 of 5 agree", "no majority"). The colours go from dark
+# blue to yellow, with orange for no majority
+agreement_colours <- c(colorRampPalette(c("#0072B2", "#56B4E9", "#F0E442"))(n_methods - n_majority + 1),
+                       "#D55E00")
+names(agreement_colours) <- c(paste(n_methods:n_majority, "of", n_methods, "agree"), "no majority")
 
-# the labels from each classification script
+agreement_colours
+
+# use the same factor levels for every method (so the colours are consistent)
 eagle_states <- eagle_states %>%
-  mutate(
-    
-    kmeans_inst = case_when(kmeans_inst == 1 ~ "ascending",
-                            kmeans_inst == 2 ~ "gliding",
-                            kmeans_inst == 3 ~ "flapping"),
-    
-    kmeans_agg = case_when(kmeans_agg == 1 ~ "flapping",
-                           kmeans_agg == 2 ~ "ascending",
-                           kmeans_agg == 3 ~ "gliding"),
-    
-    kmeans_comb = case_when(kmeans_comb == 1 ~ "gliding",
-                            kmeans_comb == 2 ~ "flapping",
-                            kmeans_comb == 3 ~ "ascending"),
-    
-    hmm = case_when(hmm == 1 ~ "gliding",
-                    hmm == 2 ~ "flapping",
-                    hmm == 3 ~ "ascending")
-    
-    ) %>%
-  # use the same factor levels for every method (so the colours are consistent)
   mutate(across(all_of(state_cols), \(x) factor(x, levels = names(state_colours))))
 
 ```
 
 ## Calculate the agreement between the methods
 
-For each fix we count how many of the four methods classified it as each state. From this we get:
+For each fix we count how many of the included methods classified it as each state. From this we get:
 
-- `n_agree` - the number of methods that agree on the most common state (2, 3 or 4)
-- `agreement` - whether all 4 methods agree, 3 of the 4 agree, or there is no majority (a 2-2 or 2-1-1 split)
-- `consensus` - the state that at least 3 of the 4 methods agree on (otherwise 'no majority')
-- `odd_one_out` - when 3 of the 4 methods agree, the method that disagrees
+- `n_agree` - the number of methods that agree on the most common state
+- `agreement` - how many of the methods agree (e.g. 4 of 5), or 'no majority' when no state was classified by more than half of the methods
+- `consensus` - the state that more than half of the methods agree on (otherwise 'no majority')
 
 ```{r}
 
@@ -169,27 +185,21 @@ eagle_states <- eagle_states %>%
     # the number of methods that agree on the most common state
     n_agree = pmax(n_ascending, n_flapping, n_gliding),
 
-    agreement = case_when(n_agree == 4 ~ "all 4 agree",
-                          n_agree == 3 ~ "3 of 4 agree",
-                          n_agree == 2 ~ "no majority"),
+    # e.g. "4 of 5 agree", or 'no majority' if fewer than n_majority methods agree
+    agreement = if_else(n_agree >= n_majority,
+                        paste(n_agree, "of", n_methods, "agree"),
+                        "no majority"),
 
-    # the state that at least 3 of the 4 methods agree on
-    consensus = case_when(n_ascending >= 3 ~ "ascending",
-                          n_flapping >= 3 ~ "flapping",
-                          n_gliding >= 3 ~ "gliding",
-                          TRUE ~ "no majority"),
-
-    # when 3 of the 4 methods agree, which method disagrees?
-    odd_one_out = case_when(n_agree != 3 ~ NA,
-                            kmeans_inst != consensus ~ method_labels["kmeans_inst"],
-                            kmeans_agg != consensus ~ method_labels["kmeans_agg"],
-                            kmeans_comb != consensus ~ method_labels["kmeans_comb"],
-                            hmm != consensus ~ method_labels["hmm"])
+    # the state that a majority of the methods agree on (only one state can
+    # have a majority, as it's more than half of the methods)
+    consensus = case_when(n_ascending >= n_majority ~ "ascending",
+                          n_flapping >= n_majority ~ "flapping",
+                          n_gliding >= n_majority ~ "gliding",
+                          TRUE ~ "no majority")
     ) %>%
   # set the order of the levels for plotting
   mutate(agreement = factor(agreement, levels = names(agreement_colours)),
-         consensus = factor(consensus, levels = names(consensus_colours)),
-         odd_one_out = factor(odd_one_out, levels = method_labels))
+         consensus = factor(consensus, levels = names(consensus_colours)))
 
 ```
 
@@ -279,7 +289,8 @@ map_colours <- list(agreement = agreement_colours,
                     kmeans_inst = state_colours,
                     kmeans_agg = state_colours,
                     kmeans_comb = state_colours,
-                    hmm = state_colours)
+                    hmm = state_colours,
+                    embc = state_colours)
 
 # the same function as in the classification scripts, with one addition - the
 # 'colours' argument, which sets the colours of categorical variables
@@ -401,7 +412,7 @@ flight_explorer(segment_explore, explore_vars, diverging = diverging_vars, colou
 
 ## Pull out just the ascending state (soaring)
 
-We keep only the fixes that at least 3 of the 4 methods classified as ascending, and then split them into separate soaring bouts.
+We keep only the fixes that more than half of the methods classified as ascending, and then split them into separate soaring bouts.
 
 For each soaring fix we calculate the gap between the end of the previous soaring step and the start of this one, which is the time that the eagle spent doing something else (gliding, flapping, or a fix with no majority). Consecutive soaring steps have a gap of 0 seconds. A new bout starts when:
 
@@ -615,7 +626,7 @@ flapping_bouts %>%
 
 ## Time spent soaring
 
-The total time spent soaring (in bouts of at least `min_bout_s`), compared to the total flight time (the sum of the step durations of all of the fixes that were classified by all four methods).
+The total time spent soaring (in bouts of at least `min_bout_s`), compared to the total flight time (the sum of the step durations of all of the fixes that were classified by all of the included methods).
 
 ```{r}
 
@@ -1161,11 +1172,11 @@ soaring_map %>%
 
 For every cell, we calculate the total time spent soaring (the sum of the step durations of the soaring fixes in that cell) and the total flight time (the sum of the step durations of all fixes in that cell). The proportion of time spent soaring is then the soaring time divided by the flight time.
 
-The grid is made by aggregating the 30 m elevation raster into larger cells (`cell_size_m`), so that the cells line up with the spatial layers, and the landscape variables can be aggregated to exactly the same cells for the modelling. Smaller cells match the landscape features more closely, but have fewer fixes in each, so the proportions are noisier (for Stella, the median number of fixes in a cell is 9 at 30 m, compared to 65 at 150 m). `cell_size_m` needs to be a multiple of 30 m.
+The grid is made by aggregating the 30 m elevation raster into larger cells (`cell_size_m`), so that the cells line up with the spatial layers, and the landscape variables can be aggregated to exactly the same cells for the modelling. Smaller cells match the landscape features more closely, but have fewer fixes in each, so the proportions are noisier, the median number of fixes in a cell is 9 at 30 m, compared to 65 at 150 m). `cell_size_m` needs to be a multiple of 30 m.
 
 Each fix is assigned to a cell by the location at the end of its step (the same location used in the maps above).
 
-- The flight time includes every fix that was classified by all four methods (including fixes with no majority), as in the 'Time spent soaring' section above.
+- The flight time includes every fix that was classified by all of the included methods (including fixes with no majority), as in the 'Time spent soaring' section above.
 - The soaring time only includes the soaring fixes in bouts of at least `min_bout_s`, so the soaring fixes in shorter bouts count towards the flight time but not the soaring time.
 - The cells are combined across eagles. To calculate them separately for each eagle, add `name` to both `group_by()` calls (the maps would then need to be filtered to one eagle).
 
@@ -1494,7 +1505,7 @@ cat("\n\n:::\n")
 
 ```{r}
 
-write_csv(combined_bouts, "outputs/combined_bouts_consensus.csv")
+write_csv(combined_bouts, paste0("outputs/combined_bouts_consensus_", eagle_name, ".csv"))
 
 ```
 

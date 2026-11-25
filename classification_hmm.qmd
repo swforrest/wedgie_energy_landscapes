@@ -74,7 +74,7 @@ eagledata4 %>%
 
 # Select a subset of the data for prototyping
 
-To reduce the dataset while testing models, we'll use a single eagle's data - Stella.
+To reduce the dataset while testing models, we'll use a single eagle's data.
 
 ```{r}
 
@@ -82,7 +82,8 @@ To reduce the dataset while testing models, we'll use a single eagle's data - St
 # which_data <- "all"
 
 # to pick a single eagle's data
-which_data <- "Stella"
+# which_data <- "Stella"
+which_data <- "Tabatha"
 
 if(which_data == "all") {
   # keep all data
@@ -629,7 +630,7 @@ The parameters are estimated by numerical optimisation, which starts from initia
 
 The initial values below were checked by refitting the models from random starting values (see [Check for local maxima](#check-for-local-maxima)). For three and four states, the values were also adjusted to be close to the estimated values, to keep the state order consistent across the models (e.g. the circling state is always the last state). The state names in the comments are only hypotheses - check the estimated distributions and the flight paths before naming the states.
 
-The models take a few minutes each to fit with Stella's data (\~500,000 fixes).
+The models take a few minutes each to fit with one eagle's data (\~500,000 to 800,000 fixes).
 
 ### 2 states
 
@@ -925,6 +926,25 @@ eagle_data$hmm4_prob <- apply(hmm4$state_probs(), 1, max)
 
 ```
 
+We also save the behaviour of each state of the 3-state HMM in a `behavior` column, so that the other scripts (such as `classification_agreement.qmd` and `energy_harvesting_data_prep.qmd`) don't need to label the states themselves. The order of the states is set by the initial values (see [Assessing states](#assessing-states) below), but check that these labels still match the plots there whenever the script is re-run.
+
+```{r}
+
+# the behaviour of each state of the 3-state HMM (see 'Assessing states' below)
+state_1 <- "gliding"
+state_2 <- "flapping"
+state_3 <- "ascending"
+
+# the behaviour of each fix, from the 3-state HMM
+eagle_data <- eagle_data %>%
+  mutate(behavior = case_when(hmm3 == 1 ~ state_1,
+                              hmm3 == 2 ~ state_2,
+                              hmm3 == 3 ~ state_3))
+
+table(eagle_data$hmm3, eagle_data$behavior)
+
+```
+
 ## Write the data to CSV
 
 ```{r}
@@ -1079,21 +1099,11 @@ ggplot(pca.dat, aes(x=variable, y=Comp.2)) +
 
 We have tried to remove perching fixes beforehand (but some still may remain), so we use the 3-state HMM to identify the other three behaviours in @Bergen2022-rj (ascending, flapping, gliding).
 
-The order of the HMM states is set by the initial values, so state 1 is the straight, fast and descending state (gliding), state 2 is the fairly straight, slow and level state (flapping), and state 3 is the turning and climbing state (ascending). Check these names against the [summary of the decoded states](#summarise-the-decoded-states) and the plots below, particularly if the initial values or the data change.
+The order of the HMM states is set by the initial values, so state 1 is the straight, fast and descending state (gliding), state 2 is the fairly straight, slow and level state (flapping), and state 3 is the turning and climbing state (ascending). Check these names against the [summary of the decoded states](#summarise-the-decoded-states) and the plots below, particularly if the initial values or the data change. The names are set in [Assign the state labels to the data](#assign-the-state-labels-to-the-data) above (`state_1`, `state_2` and `state_3`), and saved in the CSV - if a state has the wrong name, change it there and re-run the script.
 
 ```{r}
 
-state_1 <- "gliding"
-state_2 <- "flapping"
-state_3 <- "ascending"
-# state_4 <- "..."
-
 eagle_subset <- eagle_subset %>%
-  mutate(behavior = case_when(
-                              hmm3==1~state_1,
-                              hmm3==2~state_2,
-                              hmm3==3~state_3)
-         ) %>%
   # reorder the levels
   mutate(behavior = factor(behavior, levels = c("ascending", "flapping", "gliding")))
 

@@ -32,7 +32,7 @@ editor:
 editor_options:
   chunk_output_type: inline
 abstract: |
-  Here we use the behavioural states estimated by the classification methods to identify where and when wedge-tailed eagles 'harvest' environmental energy by soaring. We are now associated the soaring bouts (with flapping bouts as the negative samples) to time variables and static landscape features such as topography.
+  Here we use the behavioural states estimated by the classification methods to identify where and when wedge-tailed eagles 'harvest' environmental energy by soaring. We relate the soaring bouts (with flapping bouts as the negative samples) to the time of day, the day of the year and static landscape features such as topography, using a random forest. Because bouts that happen close together in space or time are not independent, the model is validated with day-blocked and spatially-blocked cross-validation, and we compare it to models with only the time or only the landscape variables. We then look at which variables matter most (permutation importance), how they affect the probability of soaring (accumulated local effects), and map the relative suitability for soaring at different times of the day and year.
 ---
 
 # Load packages
@@ -40,22 +40,203 @@ abstract: |
 ```{r}
 
 library(tidyverse)
-packages <- c("leaflet", "terra", "tidyterra")
+packages <- c("leaflet", "terra", "tidyterra", "sf",
+              "ranger",   # random forests
+              "blockCV",  # spatial blocks for cross-validation (cv_spatial_autocor also needs 'automap')
+              "pROC",     # AUC and thresholds
+              "iml",      # accumulated local effects
+              "suncalc")  # sunrise and sunset
 walk(packages, require, character.only = T)
+
+```
+
+# Settings
+
+All of the settings that might need changing are in this one chunk.
+
+- `eagle_name` - the eagle to model. This reads that eagle's bouts from `energy_harvesting_data_prep.qmd` (run that script for the same eagle first), and the outputs are saved in a separate folder for each eagle
+- `seed` - the random seed, so that the folds, permutations and forests are the same each time the script is run
+- `n_trees` - the number of trees in each random forest (fewer are used while tuning, to be quicker)
+- the number of folds for each type of cross-validation, and the size of the spatial blocks (see the cross-validation section for how these were chosen)
+- `test_run` - set to `TRUE` to run everything on a random 20% of the days, which is quicker when testing changes to the script
+- `out_dir` - the folder for the model, predictions, tables and rasters made by this script
+
+```{r}
+
+# the eagle to model
+eagle_name <- "Tabatha"
+
+# random seed for the folds, permutations and forests
+seed <- 2026
+
+# local time zone (for the date and day of year)
+local_tz <- "Australia/Hobart"
+
+# number of trees in each random forest, and while tuning
+n_trees <- 1000
+n_trees_tuning <- 500
+
+# number of folds for each cross-validation scheme
+n_folds_random <- 10
+n_folds_day <- 10
+n_folds_spatial <- 5
+
+# width of the square spatial blocks (m)
+block_size_m <- 2000
+
+# number of times each variable is shuffled for the permutation importance
+n_permutations <- 5
+
+# TRUE to only use a random 20% of the days (for testing changes to the script)
+test_run <- FALSE
+
+# folder for the outputs of this script (one for each eagle)
+out_dir <- paste0("outputs/random_forest_", eagle_name)
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+# colours for each behaviour (the same as in the other scripts)
+behaviour_colours <- c(soaring = "#E69F00", flapping = "#56B4E9")
 
 ```
 
 # Import data from `energy_harvesting_data_prep.qmd`
 
+Each row is a soaring or flapping bout (at least 30 seconds of that behaviour, with a new bout starting after a gap of more than 60 seconds), with the values of the landscape variables at the start location of the bout. `soaring` is the response: 1 for a soaring bout and 0 for a flapping bout.
+
 ```{r}
 
-combined_bouts <- read_csv("outputs/combined_bouts_consensus.csv")
+combined_bouts <- read_csv(paste0("outputs/combined_bouts_consensus_", eagle_name, ".csv"))
+
+# number of bouts of each behaviour for each eagle
+combined_bouts %>% count(name, behaviour)
+
+```
+
+## Time variables
+
+We describe when each bout happened with two variables, both calculated at the start of the bout (the same point in time and place as the landscape variables).
+
+**Day fraction** (`day_fraction`) - the time of day relative to sunrise and sunset: 0 is sunrise, 1 is sunset and 0.5 is (very close to) solar noon. Times before sunrise are negative and times after sunset are above 1. The clock time means different things at different times of the year - 9 am is about 3 hours after sunrise in mid-summer but only 1.5 hours in mid-winter, and the clock jumps by an hour when daylight saving starts and ends. Thermals develop as the ground heats up after sunrise and fade towards sunset, so scaling the time to the daylight period makes the same value comparable through the year.
+
+The sunrise and sunset times are calculated with `suncalc` for the local date and the start location of each bout. The trade-off is that the same day fraction is a different length of time in summer and winter (a quarter of the day is about 3.7 hours in mid-summer and 2.4 hours in mid-winter), but the day of the year is also in the model, so the forest can account for this. The day fraction doesn't need to be made circular, as it doesn't wrap around at midnight.
+
+**Day of the year** (`yday`) is circular - 31 December and 1 January are next to each other, but are as far apart as possible as numbers. We therefore split it into its sine and cosine:
+
+- `yday_cos` is 1 at the start of January (mid-summer) and -1 at the start of July (mid-winter), so it is roughly a summer to winter axis
+- `yday_sin` is 1 at the start of April (autumn) and -1 at the start of October (spring), so it separates autumn from spring (which have similar day lengths but different temperatures)
+
+Together they give each day a unique position around a circle. When interpreting the model we treat them as one variable (e.g. they are shuffled together for the permutation importance).
+
+```{r}
+
+combined_bouts <- combined_bouts %>%
+  mutate(
+    # local date and day of the year
+    date_local = as_date(with_tz(start, local_tz)),
+    yday = yday(date_local),
+    # day of the year around a circle
+    yday_sin = sin(2 * pi * yday / 365.25),
+    yday_cos = cos(2 * pi * yday / 365.25)
+  )
+
+# sunrise and sunset on the local date at the start location of each bout
+# (getSunlightTimes returns one row for each row of data, in the same order)
+bout_sun_times <- getSunlightTimes(data = data.frame(date = combined_bouts$date_local,
+                                                     lat = combined_bouts$lat,
+                                                     lon = combined_bouts$lon),
+                                   keep = c("sunrise", "sunset"), tz = "UTC")
+
+# check that the rows are in the same order (should be TRUE)
+all(bout_sun_times$date == combined_bouts$date_local & bout_sun_times$lat == combined_bouts$lat)
+
+combined_bouts <- combined_bouts %>%
+  mutate(sunrise = bout_sun_times$sunrise,
+         sunset = bout_sun_times$sunset,
+         # time since sunrise as a fraction of the time from sunrise to sunset
+         # (0 = sunrise, 1 = sunset, negative before sunrise, above 1 after sunset)
+         day_fraction = as.numeric(difftime(start, sunrise, units = "secs")) /
+           as.numeric(difftime(sunset, sunrise, units = "secs")))
+
+# the range of day fractions
+summary(combined_bouts$day_fraction)
+
+# number of bouts before sunrise and after sunset
+sum(combined_bouts$day_fraction < 0)
+sum(combined_bouts$day_fraction > 1)
+
+```
+
+## Predictor variables
+
+The predictors are the time variables and the topographic variables that were extracted at the start location of each bout in `energy_harvesting_data_prep.qmd`. Aspect is replaced by northness and eastness, as aspect is circular (and flat cells have an aspect of -1).
+
+**Variables we don't use (leakage).** The model should only use information that would be available for a location and time *without* tracking an eagle there, so we can predict to new places and times. We therefore never use:
+
+- variables that describe the movement itself, which differ between soaring and flapping by definition - the bout duration, number of fixes, time soaring/flapping, altitude gained, vertical rate, and flight height
+- the eagle's name or the bout ids
+- the coordinates (`utme`, `utmn`, `lat`, `lon`) - with them, the forest can memorise the places that the eagle soared, which looks good when the training and test data are close together, but doesn't transfer to new places
+- `hour`, which is in local clock time and is replaced by `day_fraction`
+
+```{r}
+
+# the variables used in the models, in groups
+time_vars <- c("day_fraction", "yday_sin", "yday_cos")
+landscape_vars <- c("elevation", "tpi_300m", "slope", "ruggedness", "northness", "eastness")
+predictors <- c(time_vars, landscape_vars)
+
+# labels for the plots
+variable_labels <- c(day_fraction = "Day fraction (0 = sunrise, 1 = sunset)",
+                     yday_sin = "Day of year (sine)",
+                     yday_cos = "Day of year (cosine)",
+                     elevation = "Elevation (m)",
+                     tpi_300m = "Topographic position index (300 m)",
+                     slope = "Slope (degrees)",
+                     ruggedness = "Ruggedness",
+                     northness = "Northness",
+                     eastness = "Eastness")
+
+```
+
+## Missing values
+
+Random forests (in `ranger`) can't use rows with missing values. The rasters are missing (NA) over the sea, and the slope, ruggedness and aspect layers are also missing for a thin strip of cells along the coast (they are calculated from neighbouring cells, some of which are sea). We remove these bouts.
+
+Most of the bouts that are removed are flapping bouts over the sea, so the model only describes soaring over land.
+
+<!-- TODO: if soaring over the sea or along the coastline is of interest, the sea cells could be filled as flat (elevation 0, slope 0, northness and eastness 0, ruggedness 1, TPI 0) in energy_harvesting_data_prep.qmd, rather than removing these bouts. -->
+
+```{r}
+
+# why each bout has missing values (if it does)
+combined_bouts %>%
+  mutate(missing = case_when(is.na(elevation) ~ "over the sea (no elevation)",
+                             if_any(all_of(predictors), is.na) ~ "on the coast (no slope, ruggedness or aspect)",
+                             TRUE ~ "no missing values")) %>%
+  count(missing, behaviour) %>%
+  pivot_wider(names_from = behaviour, values_from = n)
+
+# the data for the models - the bouts with all of the predictors, with the
+# behaviour as a factor (flapping first, so that soaring is the 'event')
+model_data <- combined_bouts %>%
+  drop_na(all_of(predictors)) %>%
+  mutate(behaviour = factor(behaviour, levels = c("flapping", "soaring")))
+
+# use a random 20% of the days when testing changes to the script
+if (test_run) {
+  set.seed(seed)
+  test_days <- sample(unique(model_data$date_local),
+                      size = round(0.2 * n_distinct(model_data$date_local)))
+  model_data <- model_data %>% filter(date_local %in% test_days)
+}
+
+# number of bouts of each behaviour used in the models
+model_data %>% count(behaviour) %>% mutate(proportion = n / sum(n))
 
 ```
 
 ## Spatial layers
 
-We read in the spatial layers and crop them to the area around all of the flight locations (plus a buffer), so they are quick to plot. Add any other rasters to `raster_files` to include them in the leaflet map below - the names are used as the layer names in the map.
+We read in the spatial layers and crop them to the area around all of the flight locations (plus a buffer), so they are quick to plot. Add any other rasters to `raster_files` to include them in the leaflet map below - the names are used as the layer names in the map. The same layers are used to make the prediction maps at the end of the script.
 
 The rasters are at 30 m resolution. If the soaring locations cover a large area (e.g. when using all eagles), uncomment the `aggregate()` line to use a coarser resolution, otherwise the maps will be slow and the leaflet map may hit its size limit.
 
@@ -103,12 +284,6 @@ Hover over a bout to see its details and the values of the environmental variabl
 The times are read in from the csv as UTC, so they are converted back to local Tasmanian time for the labels.
 
 ```{r}
-
-# colours for each behaviour (the same as in the other scripts)
-behaviour_colours <- c(soaring = "#E69F00", flapping = "#56B4E9")
-
-# local time zone (Tasmania)
-local_tz <- "Australia/Hobart"
 
 # the environmental variables to show in the hover labels (the spatial layers,
 # plus northness and eastness, that are also columns in combined_bouts)
@@ -171,6 +346,1050 @@ bout_map %>%
   addScaleBar(position = "bottomleft")
 
 ```
+
+# Exploratory checks
+
+## Bout durations
+
+The bout durations aren't used in the model (they describe the movement), but it is useful to check that the soaring and flapping bouts are of similar lengths, so that one class isn't, for example, made up of much shorter (and noisier) bouts.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 3.5
+
+model_data %>%
+  ggplot() +
+  geom_histogram(aes(x = duration_s / 60, fill = behaviour),
+                 bins = 60, position = "identity", alpha = 0.6) +
+  scale_fill_manual(values = behaviour_colours) +
+  scale_x_log10() +
+  labs(x = "Bout duration (minutes, log scale)", y = "Number of bouts", fill = "Behaviour") +
+  theme_bw()
+
+```
+
+## Predictor distributions by behaviour
+
+The distribution of each predictor for the soaring and flapping bouts. Variables where the two distributions differ are likely to be useful for the model (although the random forest can also use variables that only matter in combination with others, which won't show up here).
+
+Note the spikes at 0 for slope, northness and eastness - many bouts started over flat ground.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 7
+
+model_data %>%
+  select(behaviour, all_of(predictors)) %>%
+  pivot_longer(-behaviour, names_to = "variable") %>%
+  mutate(variable = factor(variable_labels[variable], levels = variable_labels)) %>%
+  ggplot() +
+  geom_histogram(aes(x = value, y = after_stat(density), fill = behaviour),
+                 bins = 40, position = "identity", alpha = 0.6) +
+  facet_wrap(~ variable, scales = "free") +
+  scale_fill_manual(values = behaviour_colours) +
+  labs(x = NULL, y = "Density", fill = "Behaviour") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+```
+
+## Correlation between predictors
+
+Random forests can use correlated predictors, but correlation makes it hard to tell which of the correlated variables the eagles are responding to. When two variables carry the same information, the forest splits on either of them more or less at random, so the importance and effect of each can be underestimated.
+
+We flag the pairs of predictors with a correlation above 0.8, and define groups of related predictors. In the interpretation section we look at the importance of each group as well as each variable.
+
+```{r}
+#| fig-width: 7
+#| fig-height: 6
+
+predictor_cor <- cor(model_data %>% select(all_of(predictors)))
+
+predictor_cor %>%
+  as_tibble(rownames = "variable_1") %>%
+  pivot_longer(-variable_1, names_to = "variable_2", values_to = "r") %>%
+  mutate(across(c(variable_1, variable_2), \(x) factor(x, levels = predictors))) %>%
+  ggplot(aes(x = variable_1, y = variable_2, fill = r)) +
+  geom_tile() +
+  geom_text(aes(label = round(r, 2)), size = 3) +
+  scale_fill_distiller(palette = "RdBu", limits = c(-1, 1), direction = 1) +
+  labs(x = NULL, y = NULL, fill = "Correlation") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+# pairs of predictors with a correlation above 0.8 (each pair once)
+predictor_cor %>%
+  as_tibble(rownames = "variable_1") %>%
+  pivot_longer(-variable_1, names_to = "variable_2", values_to = "r") %>%
+  filter(variable_1 < variable_2, abs(r) > 0.8)
+
+```
+
+The groups of predictors, which are shuffled together when calculating the grouped importance:
+
+- **elevation and position** - elevation and the topographic position index (whether a location is higher or lower than its surroundings)
+- **steepness** - slope and ruggedness (which are highly correlated)
+- **aspect** - northness and eastness
+- **time of day** - the day fraction (the time since sunrise, relative to the length of the day)
+- **season** - the sine and cosine of the day of the year (which only make sense together)
+
+```{r}
+
+predictor_groups <- list(elevation_position = c("elevation", "tpi_300m"),
+                         steepness = c("slope", "ruggedness"),
+                         aspect = c("northness", "eastness"),
+                         time_of_day = "day_fraction",
+                         season = c("yday_sin", "yday_cos"))
+
+group_labels <- c(elevation_position = "Elevation & topographic position",
+                  steepness = "Slope & ruggedness",
+                  aspect = "Aspect (northness & eastness)",
+                  time_of_day = "Time of day (day fraction)",
+                  season = "Day of year (sine & cosine)")
+
+```
+
+# Validation design
+
+## Why not a random split?
+
+The bouts are not independent samples. Bouts from the same day share the same weather (which drives thermals and wind), and bouts that are close together in space share the same landscape. Most of the bouts are also from short gaps within the same flights. If the data are split at random into training and test sets, almost every test bout has a near-identical neighbour in the training data, so the model is tested on data it has effectively already seen, and the accuracy is overestimated [@Roberts2017-ax]. For the same reason the 'out-of-bag' error that random forests report is too optimistic.
+
+The question we want to answer is how well the model predicts soaring in conditions it hasn't seen, so we hold out whole blocks of data:
+
+- **Day-blocked cross-validation** - all of the bouts from the same (local) date are in the same fold, so the model is always tested on days it wasn't trained on. This tests transfer to new days (and new weather).
+- **Spatial block cross-validation** - the study area is split into square blocks, and all of the bouts that started in a block are in the same fold [@Valavi2019-sz]. This tests transfer to new places.
+- **Random 10-fold cross-validation** is also shown, but only as a reference for how optimistic a random split is. It isn't used to judge the model.
+- **Leave-one-bird-out cross-validation** tests transfer to new individuals, which is what we ultimately want for an energy landscape for the whole population. There is currently only one eagle in the data, so this is skipped, but it runs automatically when the data has more than one eagle.
+
+<!-- TODO: once more eagles are classified and added to combined_bouts, leave-one-bird-out becomes the headline validation (and metrics should also be reported per bird). -->
+
+## Random and day folds
+
+```{r}
+
+set.seed(seed)
+
+# random folds - each bout is assigned to a fold at random
+model_data <- model_data %>%
+  mutate(fold_random = sample(rep(1:n_folds_random, length.out = n())))
+
+# day folds - each date is assigned to a fold at random, and every bout on that
+# date gets the same fold
+day_folds <- model_data %>%
+  distinct(date_local) %>%
+  mutate(fold_day = sample(rep(1:n_folds_day, length.out = n())))
+
+model_data <- model_data %>% left_join(day_folds, by = "date_local")
+
+# bird folds - one fold for each eagle (only when there is more than one eagle)
+if (n_distinct(model_data$name) > 1) {
+  model_data <- model_data %>% mutate(fold_bird = as.integer(factor(name)))
+}
+
+```
+
+## Spatial folds
+
+To choose the block size, we estimate the distance over which the response (soaring or flapping) is spatially autocorrelated, from the range of a variogram fitted to the bout start locations (`blockCV::cv_spatial_autocor`). Bouts further apart than this range are roughly independent. The blocks should be at least this size, so that most test bouts are far enough from the training bouts.
+
+For Tabatha, the range is only about 300 m, but bouts also move - a median soaring bout lasts about 2 minutes, in which an eagle can travel a kilometre or more. We therefore use 2 km blocks (several times the range, and longer than most bouts travel). The bouts are within an area of only about 6 × 9 km, so this gives 14 blocks, which are assigned to 5 folds. Larger blocks (3 km) made the folds very unbalanced (from about 800 bouts in one fold to more than 8000 in another).
+
+```{r}
+
+# the bout start locations as spatial points (GDA94 / MGA zone 55)
+bouts_sf <- st_as_sf(model_data, coords = c("utme", "utmn"), crs = "EPSG:28355", remove = FALSE)
+
+# range of the spatial autocorrelation in the response (m)
+soaring_autocor <- cv_spatial_autocor(x = bouts_sf, column = "soaring",
+                                      plot = FALSE, progress = FALSE)
+paste0("Range of spatial autocorrelation in soaring = ", round(soaring_autocor$range), " m")
+
+# split the area into square blocks, and assign the blocks to folds at random.
+# Of 100 random assignments, cv_spatial keeps the one with the most even folds
+spatial_cv <- cv_spatial(x = bouts_sf, column = "soaring",
+                         size = block_size_m, k = n_folds_spatial,
+                         hexagon = FALSE, selection = "random", iteration = 100,
+                         seed = seed, biomod2 = FALSE,
+                         progress = FALSE, report = FALSE, plot = FALSE)
+
+model_data$fold_spatial <- spatial_cv$folds_ids
+bouts_sf$fold_spatial <- spatial_cv$folds_ids
+
+# number of blocks that contain bouts
+paste0("Number of spatial blocks = ", nrow(spatial_cv$blocks))
+
+```
+
+The spatial blocks and the bout start locations, coloured by their fold.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+ggplot() +
+  geom_sf(data = bouts_sf, aes(colour = factor(fold_spatial)), size = 0.3, alpha = 0.5) +
+  geom_sf(data = spatial_cv$blocks, fill = NA, colour = "black") +
+  scale_colour_brewer(palette = "Set1") +
+  guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+  labs(colour = "Spatial fold") +
+  theme_bw()
+
+```
+
+## Number of bouts in each fold
+
+The proportion of soaring bouts should be similar in each fold, otherwise a fold can be easy or hard to predict just because of its mix of soaring and flapping.
+
+```{r}
+
+# the cross-validation schemes, and the column with the folds for each
+cv_schemes <- c(random = "fold_random", day = "fold_day", spatial = "fold_spatial")
+if ("fold_bird" %in% names(model_data)) cv_schemes <- c(cv_schemes, bird = "fold_bird")
+
+cv_scheme_labels <- c(random = "Random 10-fold (reference only)",
+                      day = "Day-blocked",
+                      spatial = "Spatial blocks",
+                      bird = "Leave-one-bird-out")
+
+model_data %>%
+  pivot_longer(all_of(unname(cv_schemes)), names_to = "scheme", values_to = "fold") %>%
+  group_by(scheme, fold) %>%
+  summarise(n_bouts = n(),
+            prop_soaring = round(mean(soaring), 2),
+            .groups = "drop") %>%
+  pivot_wider(names_from = scheme, values_from = c(n_bouts, prop_soaring))
+
+```
+
+# Random forest models
+
+## Helper functions
+
+We use three small functions, so that every model is fitted, predicted and evaluated in exactly the same way:
+
+- `fit_rf()` fits a probability random forest [@Breiman2001-fq] of soaring vs flapping with `ranger`, using the variables in `vars` and the hyperparameters in `params`. With `probability = TRUE`, the forest predicts the probability of soaring (the proportion of soaring bouts in the terminal nodes, averaged over the trees), rather than a class.
+- `predict_soaring()` returns the predicted probability of soaring for new data.
+- `cv_metrics()` calculates the performance metrics from the observed behaviour (1 = soaring, 0 = flapping) and the predicted probability of soaring:
+  - **AUC** - the probability that a randomly chosen soaring bout gets a higher predicted probability than a randomly chosen flapping bout (0.5 = no better than chance, 1 = perfect)
+  - **TSS** (true skill statistic) - sensitivity + specificity - 1, at the threshold that maximises it, along with the **sensitivity** (proportion of soaring bouts predicted as soaring), **specificity** (proportion of flapping bouts predicted as flapping) and the **threshold**
+  - **Brier score** - the mean squared difference between the predicted probability and the observed 0 or 1 (lower is better, and 0.25 is what you get by always predicting 0.5)
+
+```{r}
+
+# fit a probability random forest of soaring vs flapping, using the variables in vars
+fit_rf <- function(data, vars, params, num_trees = n_trees) {
+  ranger(x = data %>% select(all_of(vars)),
+         y = data$behaviour,
+         probability = TRUE,
+         num.trees = num_trees,
+         # mtry can't be more than the number of variables (e.g. the time-only model)
+         mtry = min(params$mtry, length(vars)),
+         min.node.size = params$min.node.size,
+         sample.fraction = params$sample.fraction,
+         replace = FALSE,
+         seed = seed)
+}
+
+# predicted probability of soaring
+predict_soaring <- function(model, newdata) {
+  predict(model, data = newdata)$predictions[, "soaring"]
+}
+
+# AUC, TSS (with the sensitivity, specificity and threshold) and Brier score
+cv_metrics <- function(observed, predicted) {
+  roc_curve <- pROC::roc(response = observed, predictor = predicted,
+                         levels = c(0, 1), direction = "<", quiet = TRUE)
+  # the threshold that maximises sensitivity + specificity - 1 (i.e. TSS)
+  best <- pROC::coords(roc_curve, x = "best", best.method = "youden",
+                       ret = c("threshold", "sensitivity", "specificity"),
+                       transpose = FALSE)[1, ]
+  tibble(AUC = as.numeric(pROC::auc(roc_curve)),
+         TSS = best$sensitivity + best$specificity - 1,
+         sensitivity = best$sensitivity,
+         specificity = best$specificity,
+         threshold = best$threshold,
+         Brier = mean((predicted - observed)^2))
+}
+
+```
+
+## Tuning the hyperparameters
+
+The main random forest hyperparameters are:
+
+- `mtry` - the number of variables that each split can choose from. Small values make the trees more different from each other, and give correlated variables more equal chances to be used
+- `min.node.size` - the smallest number of bouts in a terminal node. Larger values make smoother, less over-fitted probabilities
+- `sample.fraction` - the proportion of the bouts used to grow each tree (sampled without replacement). Smaller values make the trees more different, and reduce the influence of clusters of near-identical bouts
+
+We try every combination in `tuning_grid` with day-blocked cross-validation, and keep the one with the highest AUC. Ideally the tuning would be repeated inside each fold of each cross-validation scheme (nested cross-validation), but here we tune once with the day folds and use the same settings for every model. This makes the cross-validated metrics below slightly optimistic, but the grid is small and the differences between settings are small (see the table below), so the effect should be minor.
+
+```{r}
+
+tuning_grid <- expand_grid(mtry = c(1, 2, 3, 5),
+                           min.node.size = c(5, 20, 50),
+                           sample.fraction = c(0.2, 0.5))
+
+start_time <- Sys.time()
+
+tuning_results <- list()
+
+for (i in 1:nrow(tuning_grid)) {
+
+  params <- tuning_grid[i, ]
+
+  # out-of-fold predictions for these settings
+  oof <- list()
+  for (k in sort(unique(model_data$fold_day))) {
+    train <- model_data %>% filter(fold_day != k)
+    test <- model_data %>% filter(fold_day == k)
+    fit <- fit_rf(train, predictors, params, num_trees = n_trees_tuning)
+    oof[[k]] <- tibble(soaring = test$soaring, prob = predict_soaring(fit, test))
+  }
+  oof <- bind_rows(oof)
+
+  tuning_results[[i]] <- bind_cols(params, cv_metrics(oof$soaring, oof$prob))
+}
+
+tuning_results <- bind_rows(tuning_results) %>% arrange(desc(AUC))
+
+# time taken to tune
+Sys.time() - start_time
+
+tuning_results %>% mutate(across(AUC:Brier, \(x) round(x, 3)))
+
+# the best settings
+best_params <- tuning_results %>% slice(1) %>% select(mtry, min.node.size, sample.fraction)
+best_params
+
+```
+
+## Cross-validation of the four models
+
+We compare four models with exactly the same folds:
+
+- **null** - predicts the proportion of soaring bouts in the training data for every test bout (i.e. no information)
+- **time** - only the time of day and day of the year
+- **landscape** - only the topographic variables
+- **full** - the time and landscape variables together
+
+Comparing them shows how much of the ability to predict soaring comes from *when* the eagle was flying and how much from *where*, and whether the landscape adds anything once time is known.
+
+We keep the full model fitted in each day and spatial fold, as these are used for the permutation importance and the uncertainty in the prediction maps below.
+
+```{r}
+
+# the variables in each model
+model_sets <- list(time = time_vars,
+                   landscape = landscape_vars,
+                   full = predictors)
+
+start_time <- Sys.time()
+
+oof_predictions <- list()
+fold_models <- list()
+
+for (scheme in names(cv_schemes)) {
+
+  fold_col <- cv_schemes[[scheme]]
+  fold_models[[scheme]] <- list()
+
+  for (k in sort(unique(model_data[[fold_col]]))) {
+
+    train <- model_data %>% filter(.data[[fold_col]] != k)
+    test <- model_data %>% filter(.data[[fold_col]] == k)
+
+    # the null model predicts the proportion of soaring bouts in the training data
+    predictions <- tibble(bout_id = test$bout_id,
+                          scheme = scheme,
+                          fold = k,
+                          soaring = test$soaring,
+                          null = mean(train$soaring))
+
+    # fit and predict each of the random forest models
+    for (m in names(model_sets)) {
+      fit <- fit_rf(train, model_sets[[m]], best_params)
+      predictions[[m]] <- predict_soaring(fit, test)
+
+      # keep the full models (not for the random folds, which aren't used below)
+      if (m == "full" && scheme != "random") fold_models[[scheme]][[as.character(k)]] <- fit
+    }
+
+    oof_predictions[[paste(scheme, k)]] <- predictions
+  }
+}
+
+# one row for each bout, scheme and model
+oof_predictions <- bind_rows(oof_predictions) %>%
+  pivot_longer(c(null, time, landscape, full), names_to = "model", values_to = "prob") %>%
+  mutate(model = factor(model, levels = c("null", "time", "landscape", "full")))
+
+# time taken for the cross-validation
+Sys.time() - start_time
+
+```
+
+## Results
+
+The metrics are calculated from the out-of-fold predictions of all of the bouts pooled together (each bout is predicted once, by the model that didn't see its fold). We also show the mean and standard deviation of the AUC across the folds, which shows how much the performance varies between days or areas.
+
+The day-blocked and spatial block results are the ones to use. The random 10-fold results are only a reference for what a random split would give.
+
+```{r}
+
+# metrics from the pooled out-of-fold predictions
+cv_results <- oof_predictions %>%
+  group_by(scheme, model) %>%
+  summarise(cv_metrics(soaring, prob), .groups = "drop")
+
+# the AUC in each fold
+fold_auc <- oof_predictions %>%
+  group_by(scheme, model, fold) %>%
+  summarise(AUC = as.numeric(pROC::auc(soaring, prob, levels = c(0, 1),
+                                       direction = "<", quiet = TRUE)),
+            .groups = "drop")
+
+cv_results <- cv_results %>%
+  left_join(fold_auc %>%
+              group_by(scheme, model) %>%
+              summarise(AUC_fold_mean = mean(AUC), AUC_fold_sd = sd(AUC), .groups = "drop"),
+            by = c("scheme", "model")) %>%
+  mutate(scheme = factor(scheme, levels = names(cv_scheme_labels))) %>%
+  arrange(scheme, model)
+
+cv_results %>%
+  mutate(scheme = cv_scheme_labels[as.character(scheme)],
+         across(where(is.numeric), \(x) round(x, 3)))
+
+```
+
+The AUC of each fold, for each model and cross-validation scheme. Each point is one fold.
+
+```{r}
+#| fig-width: 9
+#| fig-height: 4
+
+fold_auc %>%
+  mutate(scheme = factor(cv_scheme_labels[scheme], levels = cv_scheme_labels)) %>%
+  ggplot(aes(x = model, y = AUC)) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey50") +
+  geom_boxplot(outlier.shape = NA, colour = "grey60") +
+  geom_jitter(width = 0.1, height = 0, size = 1.5, alpha = 0.7) +
+  facet_wrap(~ scheme, nrow = 1) +
+  labs(x = "Model", y = "AUC of each fold") +
+  theme_bw()
+
+```
+
+**Why can the AUC be below 0.5?**
+
+- The null model predicts the same value for every bout in a fold, so its AUC within each fold is exactly 0.5 (`AUC_fold_mean` in the table). Pooled across the folds it can be slightly below 0.5, because a fold with more soaring bouts than average leaves fewer soaring bouts in its training data, so it gets a lower prediction. This is an artefact of pooling, and doesn't mean anything.
+- A model that is clearly *worse* than chance (below 0.5) is a sign that the training and test data are not independent. Within a flight, soaring and flapping bouts tend to alternate (e.g. climbing in a thermal, then flapping to the next one), so the bouts closest in time to a test bout are often the *other* behaviour. When those neighbours are in the training data (as in the random and spatial folds, which split up the days), a model that can pinpoint the time of a bout (such as the time-only model, with the day of year and day fraction) learns the behaviour of the neighbouring bouts, and so predicts the opposite of what happened. The day-blocked folds keep whole days together, which removes this. This is another reason not to trust a random split - dependence between the training and test data can bias the results in either direction, not only upwards.
+
+### Calibration
+
+Whether the predicted probabilities can be taken at face value. The out-of-fold predictions of the full model are grouped into bins of width 0.1, and the observed proportion of soaring bouts in each bin is plotted against the mean predicted probability in that bin. A well-calibrated model is on the dashed 1:1 line. The size of the points is the number of bouts in the bin.
+
+```{r}
+#| fig-width: 9
+#| fig-height: 3.5
+
+oof_predictions %>%
+  filter(model == "full") %>%
+  mutate(bin = cut(prob, breaks = seq(0, 1, by = 0.1), include.lowest = TRUE)) %>%
+  group_by(scheme, bin) %>%
+  summarise(mean_predicted = mean(prob),
+            observed = mean(soaring),
+            n_bouts = n(),
+            .groups = "drop") %>%
+  mutate(scheme = factor(cv_scheme_labels[scheme], levels = cv_scheme_labels)) %>%
+  ggplot(aes(x = mean_predicted, y = observed)) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", colour = "grey50") +
+  geom_line() +
+  geom_point(aes(size = n_bouts)) +
+  facet_wrap(~ scheme, nrow = 1) +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(x = "Mean predicted probability of soaring", y = "Observed proportion of soaring bouts",
+       size = "Number\nof bouts") +
+  theme_bw()
+
+```
+
+## Final model
+
+The final model is fitted to all of the bouts with the tuned settings. This is the model used for the effect plots and prediction maps below. Its out-of-bag prediction error (the Brier score of the bouts that weren't used to grow each tree) is printed, but for the reasons above it is optimistic and shouldn't be reported as the model's performance.
+
+```{r}
+
+final_model <- fit_rf(model_data, predictors, best_params)
+final_model
+
+```
+
+# Interpretation
+
+## Permutation importance
+
+How much the model relies on each variable. For each fold model (from the day-blocked and spatial cross-validation), we shuffle the values of one variable in the held-out bouts, which breaks its link with soaring, and measure how much the AUC drops compared to the unshuffled data. A large drop means the model needs that variable to make good predictions for new days or places. We repeat the shuffling `n_permutations` times and average.
+
+Using the held-out bouts (rather than the training data, or the 'impurity' importance that `ranger` can calculate) measures how much each variable helps to predict *new* data, rather than how much the forest used it to fit the training data, which is biased towards continuous variables with many possible split points.
+
+**Grouped importance.** With correlated predictors such as slope and ruggedness (r = 0.9), the importance of each variable on its own is misleading. When slope is shuffled, the model can still get most of the same information from ruggedness, so slope looks unimportant (and vice versa), even if steepness matters a lot. Shuffling one of a correlated pair also creates unrealistic combinations (steep slopes with low ruggedness) that the model has never seen. Shuffling the group together removes the information that the group carries jointly, and keeps the combinations within the group realistic. The sine and cosine of the day of year only make sense together, so they are always shuffled as a pair in the grouped importance. We therefore use the grouped importance as the main result, and the importance of each variable as a guide to which variable within a group matters most.
+
+```{r}
+
+# each variable on its own, and each group of variables
+importance_sets <- c(set_names(as.list(predictors)), predictor_groups)
+importance_types <- c(rep("Single variable", length(predictors)),
+                      rep("Group of variables", length(predictor_groups)))
+names(importance_types) <- names(importance_sets)
+
+# AUC from the observed behaviour and predicted probability
+auc_value <- function(observed, predicted) {
+  as.numeric(pROC::auc(observed, predicted, levels = c(0, 1), direction = "<", quiet = TRUE))
+}
+
+set.seed(seed)
+start_time <- Sys.time()
+
+importance_results <- list()
+
+for (scheme in names(fold_models)) {
+
+  fold_col <- cv_schemes[[scheme]]
+
+  for (k in names(fold_models[[scheme]])) {
+
+    fit <- fold_models[[scheme]][[k]]
+    test <- model_data %>% filter(.data[[fold_col]] == as.numeric(k))
+
+    # AUC of the held-out bouts before shuffling
+    auc_original <- auc_value(test$soaring, predict_soaring(fit, test))
+
+    for (set_name in names(importance_sets)) {
+
+      vars <- importance_sets[[set_name]]
+
+      for (i in 1:n_permutations) {
+        # shuffle the rows of these variables (in the same order for every
+        # variable in a group, so their combinations stay the same)
+        shuffled <- test
+        new_order <- sample(nrow(test))
+        shuffled[vars] <- test[new_order, vars]
+
+        importance_results[[length(importance_results) + 1]] <-
+          tibble(scheme = scheme,
+                 fold = k,
+                 set = set_name,
+                 type = importance_types[[set_name]],
+                 permutation = i,
+                 auc_drop = auc_original - auc_value(test$soaring, predict_soaring(fit, shuffled)))
+      }
+    }
+  }
+}
+
+importance_results <- bind_rows(importance_results)
+
+# time taken for the permutation importance
+Sys.time() - start_time
+
+# average over the permutations in each fold, then the mean and SD across folds
+importance_summary <- importance_results %>%
+  group_by(scheme, type, set, fold) %>%
+  summarise(auc_drop = mean(auc_drop), .groups = "drop") %>%
+  group_by(scheme, type, set) %>%
+  summarise(mean_auc_drop = mean(auc_drop),
+            sd_auc_drop = sd(auc_drop),
+            .groups = "drop")
+
+importance_summary %>%
+  arrange(scheme, type, desc(mean_auc_drop)) %>%
+  mutate(across(where(is.numeric), \(x) round(x, 4)))
+
+```
+
+The drop in AUC when each group (left) or variable (right) is shuffled, for the day-blocked and spatial cross-validation folds. The error bars are ± 1 standard deviation across the folds.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 5
+
+importance_summary %>%
+  mutate(label = c(group_labels, variable_labels)[set],
+         type = factor(type, levels = c("Group of variables", "Single variable")),
+         scheme = cv_scheme_labels[scheme]) %>%
+  ggplot(aes(x = mean_auc_drop, y = reorder(label, mean_auc_drop), fill = scheme)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_errorbar(aes(xmin = mean_auc_drop - sd_auc_drop, xmax = mean_auc_drop + sd_auc_drop),
+                position = position_dodge(width = 0.8), width = 0.3) +
+  geom_vline(xintercept = 0) +
+  facet_wrap(~ type, scales = "free_y") +
+  scale_fill_manual(values = c("grey40", "grey75")) +
+  labs(x = "Drop in AUC when shuffled", y = NULL, fill = "Cross-validation") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+```
+
+## Accumulated local effects
+
+How the predicted probability of soaring changes with each variable. We use accumulated local effects (ALE) [@Apley2020-iu] rather than partial dependence plots. A partial dependence plot sets every bout to each value of the variable in turn (e.g. every bout is given a slope of 20°, including bouts over flat ground with a ruggedness of 1), so with correlated predictors it averages over combinations that never occur. ALE instead only looks at how the predictions change for bouts that actually have values near each point, and adds up these local changes. The curves are centred so that the average effect is 0 - a value of 0.1 means that the probability of soaring is 0.1 higher than average at that value of the variable.
+
+The rug at the bottom of each panel shows the values in the data (a random sample of 1000 bouts) - the curves are less reliable where there are few bouts.
+
+The sine and cosine of the day of year are shown separately below.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 7
+
+# iml needs the model, the predictor data and a function that returns the
+# predicted probability of soaring
+rf_predictor <- Predictor$new(model = final_model,
+                              data = model_data %>% select(all_of(predictors)) %>% as.data.frame(),
+                              predict.function = \(model, newdata) predict_soaring(model, newdata))
+
+ale_vars <- c("day_fraction", landscape_vars)
+
+ale_results <- map(ale_vars, \(v) {
+  FeatureEffect$new(rf_predictor, feature = v, method = "ale", grid.size = 40)$results %>%
+    rename(value = all_of(v), ale = .value) %>%
+    mutate(variable = v)
+}) %>%
+  bind_rows()
+
+# a sample of the data for the rug
+set.seed(seed)
+rug_data <- model_data %>%
+  slice_sample(n = min(1000, nrow(model_data))) %>%
+  select(all_of(ale_vars)) %>%
+  pivot_longer(everything(), names_to = "variable")
+
+bind_rows(ale = ale_results, rug = rug_data, .id = "data") %>%
+  mutate(variable = factor(variable_labels[variable], levels = variable_labels)) %>%
+  ggplot(aes(x = value)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_line(data = \(d) filter(d, data == "ale"), aes(y = ale),
+            colour = behaviour_colours[["soaring"]], linewidth = 1) +
+  geom_rug(data = \(d) filter(d, data == "rug"), alpha = 0.2, length = unit(0.03, "npc")) +
+  facet_wrap(~ variable, scales = "free_x") +
+  labs(x = NULL, y = "Effect on the probability of soaring (ALE)") +
+  theme_bw()
+
+```
+
+## Seasonal effect
+
+The sine and cosine of the day of year are one variable split in two, so plotting them separately isn't very meaningful. Instead we move every bout around the circle of the year - setting all of the bouts to the same day of year, for each day in turn - and average the predicted probability of soaring. This is a partial dependence plot, which we avoided above, but here it is reasonable because the day of year is almost uncorrelated with the other variables (see the correlation matrix). Because the day fraction is relative to sunrise and sunset, moving a bout to another day of the year keeps it at the same point in the daylight period (e.g. a bout halfway through a summer day is moved to halfway through a winter day), so no bouts are moved into the night.
+
+The points are the observed proportion of soaring bouts in each month (at the middle of the month), and the size of the points is the number of bouts in that month.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+
+# the days of the year to predict for
+season_grid <- tibble(yday = seq(1, 365, by = 4)) %>%
+  mutate(yday_sin = sin(2 * pi * yday / 365.25),
+         yday_cos = cos(2 * pi * yday / 365.25))
+
+# average predicted probability of soaring when every bout is moved to each day of the year
+season_effect <- season_grid %>%
+  mutate(prob = map_dbl(1:n(), \(i) {
+    mean(predict_soaring(final_model,
+                         model_data %>% mutate(yday_sin = season_grid$yday_sin[i],
+                                               yday_cos = season_grid$yday_cos[i])))
+  }))
+
+# observed proportion of soaring bouts in each month
+monthly_soaring <- model_data %>%
+  mutate(month = month(date_local)) %>%
+  group_by(month) %>%
+  summarise(prop_soaring = mean(soaring), n_bouts = n()) %>%
+  # the day of the year at the middle of each month (in a non-leap year)
+  mutate(yday = yday(make_date(2021, month, 15)))
+
+ggplot() +
+  geom_line(data = season_effect, aes(x = yday, y = prob),
+            colour = behaviour_colours[["soaring"]], linewidth = 1) +
+  geom_point(data = monthly_soaring, aes(x = yday, y = prop_soaring, size = n_bouts),
+             alpha = 0.6) +
+  scale_x_continuous(breaks = yday(make_date(2021, 1:12, 1)), labels = month.abb) +
+  labs(x = "Day of the year", y = "Probability of soaring", size = "Number\nof bouts") +
+  theme_bw()
+
+```
+
+## Time of day through the year
+
+The average predicted probability of soaring for each day fraction and day of the year, from moving a random sample of bouts to each combination (as above, averaged over the landscape variables of the sampled bouts). The time of day and season are almost uncorrelated with the landscape variables, so averaging over the landscape in this way is reasonable. Because the day fraction is scaled to sunrise (0) and sunset (1), every cell is in daylight, whatever the time of year. The day fractions are limited to the range in the data, so the model isn't asked to predict to times when the eagle wasn't flying.
+
+```{r}
+#| fig-width: 9
+#| fig-height: 5
+
+# a random sample of bouts to average over
+set.seed(seed)
+bout_sample <- model_data %>% slice_sample(n = min(400, nrow(model_data)))
+
+# every combination of day fraction (every 0.025, within the range of the data)
+# and day of year (every week)
+time_grid <- expand_grid(day_fraction = seq(floor(min(model_data$day_fraction) * 40) / 40,
+                                            ceiling(max(model_data$day_fraction) * 40) / 40,
+                                            by = 0.025),
+                         yday = seq(1, 365, by = 7))
+
+# every sampled bout at every combination of day fraction and day of year
+time_effect <- bout_sample %>%
+  select(bout_id, all_of(landscape_vars)) %>%
+  cross_join(time_grid) %>%
+  mutate(yday_sin = sin(2 * pi * yday / 365.25),
+         yday_cos = cos(2 * pi * yday / 365.25))
+
+time_effect$prob <- predict_soaring(final_model, time_effect)
+
+time_effect <- time_effect %>%
+  group_by(day_fraction, yday) %>%
+  summarise(prob = mean(prob), .groups = "drop")
+
+time_effect %>%
+  ggplot() +
+  geom_raster(aes(x = yday, y = day_fraction, fill = prob)) +
+  # solar noon is (very close to) halfway between sunrise and sunset
+  geom_hline(yintercept = 0.5, colour = "white", linetype = "dashed") +
+  scale_fill_viridis_c() +
+  scale_x_continuous(breaks = yday(make_date(2021, 1:12, 1)), labels = month.abb,
+                     expand = c(0, 0)) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), expand = c(0, 0)) +
+  labs(x = "Day of the year", y = "Day fraction (0 = sunrise, 1 = sunset)",
+       fill = "Probability\nof soaring") +
+  theme_bw()
+
+```
+
+## Do the landscape effects change with time?
+
+The random forest can fit interactions, e.g. if slopes are only used for soaring in the afternoon, or if flat ground is only used for soaring (in thermals) in summer. To see whether the effects of the most important landscape variables change with the season or the time of day, we calculate their ALE curves separately for subsets of the bouts:
+
+- **season** - summer (December to February) and winter (June to August)
+- **time of day** - the first, middle and last third of the daylight period (day fractions below 1/3, from 1/3 to 2/3, and above 2/3)
+
+The landscape variables are the three with the largest drop in AUC in the spatial cross-validation. Each curve is centred on its own subset, so the curves show differences in the *shape* of the effect, not the overall level of soaring (which is shown in the plots above). These plots are a way to look for interactions, rather than a formal test.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 6
+
+# the three most important landscape variables in the spatial cross-validation
+top_landscape_vars <- importance_summary %>%
+  filter(scheme == "spatial", type == "Single variable", set %in% landscape_vars) %>%
+  slice_max(mean_auc_drop, n = 3) %>%
+  pull(set)
+
+top_landscape_vars
+
+# the subsets of the bouts
+model_data <- model_data %>%
+  mutate(season = case_when(month(date_local) %in% c(12, 1, 2) ~ "Summer (Dec-Feb)",
+                            month(date_local) %in% 6:8 ~ "Winter (Jun-Aug)"),
+         time_of_day = case_when(day_fraction < 1/3 ~ "First third of the day",
+                                 day_fraction <= 2/3 ~ "Middle third of the day",
+                                 TRUE ~ "Last third of the day"))
+
+subset_ale <- list()
+
+for (grouping in c("season", "time_of_day")) {
+
+  # the subsets in this grouping (without the bouts that aren't in a subset)
+  subsets <- unique(na.omit(model_data[[grouping]]))
+
+  for (s in subsets) {
+
+    subset_data <- model_data %>% filter(.data[[grouping]] == s)
+    subset_predictor <- Predictor$new(model = final_model,
+                                      data = subset_data %>% select(all_of(predictors)) %>% as.data.frame(),
+                                      predict.function = \(model, newdata) predict_soaring(model, newdata))
+
+    for (v in top_landscape_vars) {
+      subset_ale[[length(subset_ale) + 1]] <-
+        FeatureEffect$new(subset_predictor, feature = v, method = "ale", grid.size = 20)$results %>%
+        rename(value = all_of(v), ale = .value) %>%
+        mutate(variable = v, grouping = grouping, subset = s, n_bouts = nrow(subset_data))
+    }
+  }
+}
+
+subset_ale <- bind_rows(subset_ale)
+
+subset_ale %>%
+  mutate(variable = variable_labels[variable],
+         grouping = if_else(grouping == "season", "Season", "Time of day"),
+         subset = fct_relevel(subset, "Summer (Dec-Feb)", "Winter (Jun-Aug)",
+                              "First third of the day", "Middle third of the day")) %>%
+  ggplot(aes(x = value, y = ale, colour = subset)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey50") +
+  geom_line(linewidth = 0.8) +
+  facet_grid(grouping ~ variable, scales = "free_x") +
+  scale_colour_manual(values = c("#D55E00", "#0072B2", "#F0E442", "#E69F00", "#CC79A7")) +
+  labs(x = NULL, y = "Effect on the probability of soaring (ALE)", colour = NULL) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+```
+
+# Prediction maps
+
+We predict the final model to every 30 m cell in the study area, for six times:
+
+- the middle of summer (15 January, day 15) and the middle of winter (15 July, day 196)
+- at day fractions of 0.25, 0.5 and 0.75 (a quarter, half and three quarters of the way from sunrise to sunset). The table below shows the local clock times that these correspond to at the centre of the study area
+
+The time variables are the same for every cell in a map, so the differences within a map come from the landscape, and the differences between maps come from the time.
+
+**These maps show the relative suitability for soaring, not the probability that an eagle soars there.** The model compares soaring bouts with flapping bouts, so a value of 0.8 means that if the eagle is flying there at that time, it is more likely to be soaring than flapping - not that soaring happens 80% of the time, or that eagles will be there at all. The proportion of soaring and flapping bouts also depends on how the bouts were defined.
+
+Cells where any landscape variable is outside the range of the bouts used to fit the model are masked (grey), as the model has to extrapolate there. This is a simple version of the 'area of applicability' [@Meyer2021-ij], which also accounts for combinations of variables that weren't in the data.
+
+<!-- TODO: replace the range mask with CAST::aoa() if the maps are used for more than a quick look (CAST isn't installed yet). -->
+
+## Prediction data
+
+The landscape layers are stacked on the same 30 m grid as the elevation layer (the other layers are in slightly different, but equivalent, coordinate reference systems, so they are projected to the elevation grid with nearest-neighbour resampling, which keeps the cell values unchanged). We check this by extracting the stacked layers at the bout start locations, which should give exactly the same values as in `combined_bouts`.
+
+```{r}
+
+# project each layer to the elevation grid (nearest neighbour keeps the values the same)
+prediction_stack <- map(names(spatial_layers), \(layer) {
+  r <- spatial_layers[[layer]]
+  if (layer != "elevation") r <- project(r, spatial_layers$elevation, method = "near")
+  names(r) <- layer
+  r
+}) %>%
+  rast()
+
+# northness and eastness from aspect (flat cells, with an aspect of -1, are 0)
+prediction_stack$northness <- ifel(prediction_stack$aspect == -1, 0, cos(prediction_stack$aspect * pi / 180))
+prediction_stack$eastness <- ifel(prediction_stack$aspect == -1, 0, sin(prediction_stack$aspect * pi / 180))
+
+# check - the largest difference between the stacked layers and combined_bouts at
+# the bout start locations (should be 0, or a tiny rounding difference)
+stack_check <- terra::extract(prediction_stack[[landscape_vars]],
+                              vect(cbind(model_data$utme, model_data$utmn), crs = "EPSG:28355"),
+                              ID = FALSE)
+map_dbl(set_names(landscape_vars), \(v) max(abs(stack_check[[v]] - model_data[[v]])))
+
+# one row for each cell with all of the landscape variables (i.e. on land)
+# (when these are plotted with geom_raster, ggplot warns that the pixels are at
+# 'uneven intervals' - this is because some rows of cells are all sea, and can be
+# ignored, as the cells are still on a regular 30 m grid)
+grid_df <- as.data.frame(prediction_stack[[landscape_vars]], xy = TRUE, cells = TRUE, na.rm = TRUE)
+
+# cells where every landscape variable is within the range of the model data
+grid_df$in_range <- TRUE
+for (v in landscape_vars) {
+  grid_df$in_range <- grid_df$in_range &
+    grid_df[[v]] >= min(model_data[[v]]) & grid_df[[v]] <= max(model_data[[v]])
+}
+
+# number of cells, and the proportion within the range of the data
+nrow(grid_df)
+mean(grid_df$in_range)
+
+```
+
+## Time scenarios
+
+```{r}
+
+# the days of the year and day fractions to predict for
+scenario_ydays <- c(15, 196)
+scenario_day_fractions <- c(0.25, 0.5, 0.75)
+
+# sunrise and sunset (local time) on each scenario day at the centre of the
+# study area - only used to show the clock times of each scenario
+scenario_sun_times <- getSunlightTimes(date = make_date(2021, 1, 1) + scenario_ydays - 1,
+                                       lat = mean(model_data$lat), lon = mean(model_data$lon),
+                                       keep = c("sunrise", "sunset"), tz = local_tz) %>%
+  as_tibble() %>%
+  mutate(yday = yday(date)) %>%
+  select(yday, sunrise, sunset)
+
+scenarios <- expand_grid(yday = scenario_ydays, day_fraction = scenario_day_fractions) %>%
+  left_join(scenario_sun_times, by = "yday") %>%
+  mutate(season = if_else(yday == 15, "Summer (15 January)", "Winter (15 July)"),
+         time = factor(paste("Day fraction", day_fraction),
+                       levels = paste("Day fraction", scenario_day_fractions)),
+         # the local clock time of this day fraction
+         clock_time = format(sunrise + day_fraction * (sunset - sunrise), "%H:%M"),
+         # a short name for each scenario (for the raster layers)
+         name = paste0("yday", yday, "_dayfrac", day_fraction))
+
+scenarios %>% select(season, time, clock_time, sunrise, sunset)
+
+```
+
+## Predict
+
+```{r}
+
+start_time <- Sys.time()
+
+scenario_predictions <- map(1:nrow(scenarios), \(i) {
+
+  # the landscape of every cell, with the time variables of this scenario
+  newdata <- grid_df %>%
+    mutate(day_fraction = scenarios$day_fraction[i],
+           yday_sin = sin(2 * pi * scenarios$yday[i] / 365.25),
+           yday_cos = cos(2 * pi * scenarios$yday[i] / 365.25))
+
+  grid_df %>%
+    select(cell, x, y, in_range) %>%
+    mutate(prob = predict_soaring(final_model, newdata),
+           name = scenarios$name[i],
+           season = scenarios$season[i],
+           time = scenarios$time[i])
+}) %>%
+  bind_rows()
+
+# time taken to predict the maps
+Sys.time() - start_time
+
+```
+
+```{r}
+#| fig-width: 11
+#| fig-height: 6.5
+
+scenario_predictions %>%
+  # mask the cells outside the range of the data
+  mutate(prob = if_else(in_range, prob, NA)) %>%
+  ggplot() +
+  geom_raster(aes(x = x, y = y, fill = prob)) +
+  facet_grid(season ~ time) +
+  # the colour scale covers the range of the predictions (the same for every map)
+  scale_fill_viridis_c(na.value = "grey70") +
+  coord_equal() +
+  labs(x = NULL, y = NULL, fill = "Relative\nsoaring\nsuitability") +
+  theme_bw() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+
+```
+
+## Uncertainty
+
+The standard deviation of the predictions from the five full models fitted in the spatial cross-validation folds, halfway through the day (day fraction 0.5, close to solar noon) in summer and winter. Each of these models was fitted without one fold of spatial blocks, so a high standard deviation shows where the predictions depend on which areas were in the training data.
+
+```{r}
+#| fig-width: 10
+#| fig-height: 4.5
+
+noon_scenarios <- scenarios %>% filter(day_fraction == 0.5)
+
+uncertainty <- map(1:nrow(noon_scenarios), \(i) {
+
+  newdata <- grid_df %>%
+    mutate(day_fraction = noon_scenarios$day_fraction[i],
+           yday_sin = sin(2 * pi * noon_scenarios$yday[i] / 365.25),
+           yday_cos = cos(2 * pi * noon_scenarios$yday[i] / 365.25))
+
+  # predictions of each spatial fold model (one column per model)
+  fold_predictions <- map(fold_models$spatial, \(fit) predict_soaring(fit, newdata)) %>%
+    bind_cols()
+
+  grid_df %>%
+    select(cell, x, y, in_range) %>%
+    mutate(sd = apply(fold_predictions, 1, sd),
+           name = paste0(noon_scenarios$name[i], "_sd"),
+           season = noon_scenarios$season[i])
+}) %>%
+  bind_rows()
+
+uncertainty %>%
+  mutate(sd = if_else(in_range, sd, NA)) %>%
+  ggplot() +
+  geom_raster(aes(x = x, y = y, fill = sd)) +
+  facet_wrap(~ season) +
+  scale_fill_viridis_c(option = "magma", na.value = "grey70") +
+  coord_equal() +
+  labs(x = NULL, y = NULL, fill = "SD across\nspatial fold\nmodels") +
+  theme_bw() +
+  theme(axis.text = element_blank(), axis.ticks = element_blank())
+
+```
+
+# Save the outputs
+
+Everything is saved in `out_dir`:
+
+- `rf_final_model.rds` - the final random forest (read in with `readRDS()`)
+- `rf_best_params.csv` and `rf_tuning_results.csv` - the tuned hyperparameters and all of the settings that were tried
+- `rf_oof_predictions.csv` - the out-of-fold predictions of each model for each bout and cross-validation scheme
+- `rf_cv_results.csv` - the cross-validation metrics (the results table above)
+- `rf_permutation_importance.csv` - the drop in AUC for each variable and group, in each fold
+- `rf_soaring_suitability.tif` - the prediction maps (one layer per time scenario, with the cells outside the range of the data masked) and `rf_soaring_suitability_sd.tif` - the standard deviation across the spatial fold models halfway through the day
+
+```{r}
+
+saveRDS(final_model, file.path(out_dir, "rf_final_model.rds"))
+
+write_csv(best_params, file.path(out_dir, "rf_best_params.csv"))
+write_csv(tuning_results, file.path(out_dir, "rf_tuning_results.csv"))
+write_csv(oof_predictions, file.path(out_dir, "rf_oof_predictions.csv"))
+write_csv(cv_results, file.path(out_dir, "rf_cv_results.csv"))
+write_csv(importance_results, file.path(out_dir, "rf_permutation_importance.csv"))
+
+# rasters on the same grid as the elevation layer, with one layer per scenario
+predictions_to_raster <- function(predictions, value_col) {
+  layers <- map(unique(predictions$name), \(n) {
+    r <- rast(spatial_layers$elevation)
+    d <- predictions %>% filter(name == n, in_range)
+    r[d$cell] <- d[[value_col]]
+    names(r) <- n
+    r
+  })
+  rast(layers)
+}
+
+suitability_raster <- predictions_to_raster(scenario_predictions, "prob")
+uncertainty_raster <- predictions_to_raster(uncertainty, "sd")
+
+writeRaster(suitability_raster, file.path(out_dir, "rf_soaring_suitability.tif"), overwrite = TRUE)
+writeRaster(uncertainty_raster, file.path(out_dir, "rf_soaring_suitability_sd.tif"), overwrite = TRUE)
+
+suitability_raster
+
+```
+
+# Summary of the results
+
+::: {.callout-note}
+These notes describe the results for Tabatha when this script was written (November 2026). The numbers are filled in when the script is run, but the interpretation will need checking if the data change (e.g. when more eagles are added).
+:::
+
+```{r}
+
+# AUC of a model (from the pooled out-of-fold predictions) for the text below
+auc_of <- function(s, m) {
+  round(cv_results$AUC[cv_results$scheme == s & cv_results$model == m], 2)
+}
+
+```
+
+- **The predictive performance is weak.** The full model has an AUC of `r auc_of("day", "full")` for new days and `r auc_of("spatial", "full")` for new areas, so the time and the landscape at the start of a bout only just separate soaring from flapping, and the model barely transfers to new areas. The predicted probabilities are roughly calibrated where most of the bouts are, but almost all of them are between about 0.3 and 0.7 (see the calibration plots and the maps).
+- **What skill there is comes from the landscape.** The landscape-only model is about as good as the full model (AUC `r auc_of("day", "landscape")` for new days and `r auc_of("spatial", "landscape")` for new areas), while the time-only model is close to chance for new days (`r auc_of("day", "time")`). The proportion of soaring bouts changes a little through the year (lowest in autumn, around March and April, and highest in late winter and late spring) and through the day (less soaring just after sunrise and in the last quarter of the day), but these shifts are only a few percent.
+- **Elevation & topographic position is the most important group of variables for new days**, followed by aspect and slope & ruggedness. Soaring is more likely at locations that are lower than their surroundings (negative TPI, such as valleys and the bottoms of slopes) and less likely at locations that are higher than their surroundings (positive TPI), as it was for Stella. It is also a little more likely over west-facing than east-facing slopes, and at elevations of about 680 to 750 m than at lower or higher elevations. These effects are small - each changes the probability of soaring by up to about 0.05.
+- **Elevation helps to predict new days but not new areas.** Tabatha's bouts cover a narrow range of elevations (about 550 to 830 m), so elevation mostly picks out particular parts of her range, which doesn't help when predicting areas the model hasn't seen. For new areas, aspect, slope & ruggedness and elevation & topographic position are about equally (un)important.
+- **There is little evidence that the landscape effects change with the season or time of day** - the ALE curves for the subsets of bouts have similar shapes, apart from a hint that west-facing slopes are used for soaring more in winter than in summer.
+- **The random split gives a lower AUC than the day-blocked split**, rather than the higher AUC we would expect if it were too optimistic, and the time-only model is well below chance with a random split (`r auc_of("random", "time")`). This is because soaring and flapping bouts alternate within each flight (see [Why can the AUC be below 0.5?](#results)), and is another sign that bouts that are close in time aren't independent.
+- The spatial cross-validation gives a lower AUC than the day-blocked cross-validation, so the model transfers less well to new areas than to new days within the areas it has seen.
+
+Some likely reasons for the weak signal, and things to try next:
+
+- The landscape is only measured in the 30 m cell at the start of each bout, but thermals form over larger areas, and slope lift depends on the terrain upwind. Multi-scale versions of the variables (e.g. means within 250 m to 1 km), or values averaged along the path of each bout, may capture this better.
+- Slope (orographic) lift depends on the wind speed and direction relative to the slope, and thermals depend on the weather, neither of which are in the model. Adding wind (e.g. from a weather reanalysis) and its alignment with the slope is likely to help the most.
+- Land cover (the `HS_cover` rasters) isn't included yet.
+- There is only one eagle, so we can't yet test whether the model transfers to other individuals (leave-one-bird-out cross-validation).
 
 # References
 

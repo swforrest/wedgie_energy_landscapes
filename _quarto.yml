@@ -15,8 +15,8 @@ website:
   title: "Wedge-tailed eagle modelling"
   favicon: icons/wedgie_silhouette.svg
   description: "Modelling the behaviours and energy landscape of wedge-tailed eagles in Tasmania"
-  site-url: https://swforrest.github.io/wedgie_modelling/
-  repo-url: https://github.com/swforrest/wedgie_modelling
+  site-url: https://swforrest.github.io/wedgie_energy_landscapes/
+  repo-url: https://github.com/swforrest/wedgie_energy_landscapes
   repo-actions: [source]
   page-navigation: true
   search: true
@@ -50,6 +50,8 @@ website:
         - text: "Models"
         - href: energy_harvesting_random_forest.qmd
           text: "Random Forest"
+        - href: energy_harvesting_XGBoost.qmd
+          text: "XGBoost"
         # uncomment and fill in as the prediction scripts are added
         # - text: "---"
         # - text: "Predictions"
@@ -58,7 +60,7 @@ website:
 
     right:
       - icon: github
-        href: https://github.com/swforrest/wedgie_modelling
+        href: https://github.com/swforrest/wedgie_energy_landscapes
         aria-label: GitHub
   page-footer:
     left: "Scott Forrest & James Pay"

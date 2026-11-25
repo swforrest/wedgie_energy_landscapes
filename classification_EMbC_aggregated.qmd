@@ -74,7 +74,7 @@ eagledata4 %>%
 
 # Select a subset of the data for prototyping
 
-To reduce the dataset while testing models, we'll use a single eagle's data - Stella.
+To reduce the dataset while testing models, we'll use a single eagle's data.
 
 ```{r}
 
@@ -82,7 +82,8 @@ To reduce the dataset while testing models, we'll use a single eagle's data - St
 # which_data <- "all"
 
 # to pick a single eagle's data
-which_data <- "Stella"
+# which_data <- "Stella"
+which_data <- "Tabatha"
 
 if(which_data == "all") {
   # keep all data
@@ -552,7 +553,7 @@ sctr(embc_fit)
 
 # Fixing the vertical rate split at 0
 
-When we ran this with Stella's data, EMbC mostly split the fixes by their turning angle - the two largest clusters (LH and HL) are separated at a cumulative turning angle of about 2 radians. The vertical rate delimiters, however, only separated out small numbers of fixes with extreme vertical rates, as the mean vertical rate doesn't have two clear peaks for EMbC to split between. The HH cluster is also very wide, and picks up both the steepest climbs and the steepest descents (the dark blue points above and below the HL cluster in the plot above). The vertical rate part of the EMbC labels therefore doesn't separate climbing from sinking.
+With both Stella's and Tabatha's data, EMbC mostly split the fixes by their turning angle - the two largest clusters (LH and HL) are separated at a cumulative turning angle of about 2 radians. The vertical rate delimiters, however, only separated out small numbers of fixes with extreme vertical rates, as the mean vertical rate doesn't have two clear peaks for EMbC to split between. The HH cluster is also very wide, and picks up both the steepest climbs and the steepest descents (the dark blue points above and below the HL cluster in the plot above). The vertical rate part of the EMbC labels therefore doesn't separate climbing from sinking.
 
 The sign of the vertical rate has a clear meaning though: a bird with a negative vertical rate is losing height (gliding), and a bird with a zero or positive vertical rate is soaring or flapping. We would therefore like the vertical rate split to be at 0. There is no option in the `EMbC` package to fix a delimiter (they are re-estimated at every iteration), and EMbC can't be run with a single variable (the package throws an error), so instead we:
 

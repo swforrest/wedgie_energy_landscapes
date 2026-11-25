@@ -7,14 +7,18 @@ bibliography: references.bib
 
 This site collects the analysis notebooks for modelling the flight behaviour of GPS-tracked wedge-tailed eagles (*Aquila audax fleayi*) in Tasmania.
 
+The notebooks currently show the results for one eagle (Tabatha). The eagle is chosen at the top of each notebook (`which_data` in the classification notebooks, and `eagle_name` in the others).
+
 ## Behaviour classification
 
-- [K-means Instantaneous Variable](classification_kmeans_instantaneous.qmd): using variables calculated for each GPS fix to estimate behavioural states.
-- [K-means Aggregated Variables](classification_kmeans_aggregated.qmd): using variables that aggregate over a moving window (such as cumulative turning angles or average speed) to estimate behavioural states. This approach helps to smooth over jumpy states when using k-means, which treats each each sample independently.
+Each classification notebook labels the states of its 3-state model as ascending (soaring), flapping or gliding, and saves them (in the `behavior` column of its output) for the agreement and energy landscape notebooks.
+
+- [K-means Instantaneous Variables](classification_kmeans_instantaneous.qmd): using variables calculated for each GPS fix to estimate behavioural states.
+- [K-means Aggregated Variables](classification_kmeans_aggregated.qmd): using variables that aggregate over a moving window (such as cumulative turning angles or average speed) to estimate behavioural states. This approach helps to smooth over jumpy states when using k-means, which treats each sample independently.
 - [K-means Combined Variables](classification_kmeans_combined.qmd): using both instantaneous and aggregated variables to estimate behavioural states.
 - [Hidden Markov Model](classification_hmm.qmd): using a Hidden Markov Model to estimate behavioural states based on the observed GPS data.
 - [EMbC Aggregated Variables](classification_EMbC_aggregated.qmd): using expectation-maximisation binary clustering (EMbC) on the absolute cumulative turning angle and mean vertical rate over a moving window, following @Scacco2019-si. The vertical rate split is fixed at 0 to separate gliding from soaring and flapping, and the states are smoothed after classification.
-- [Agreement Between Methods](classification_agreement.qmd): comparing the states from the 3-state k-means, HMM and EMbC classifications.
+- [Agreement Between Methods](classification_agreement.qmd): comparing the states from the 3-state k-means, HMM and EMbC classifications, and finding the consensus state at each fix (the state that more than half of the methods agree on). The methods to include can be switched on and off at the top of the notebook.
 
 ## Modelling the energy landscape
 
@@ -22,11 +26,12 @@ Using the soaring behaviour identified by the classification methods to determin
 
 ### Data
 
-- [Soaring Bouts and Energy Harvesting Data](energy_harvesting_data_prep.qmd): selecting the fixes that most of the classification methods agree are soaring (ascending), splitting them into soaring bouts, and summarising when and where the eagles soar and how much altitude they gain. This creates the data that will be used to associate soaring with landscape variables (such as elevation, topographic position and ridges), but doesn't do the modelling itself.
+- [Soaring Bouts and Energy Harvesting Data](energy_harvesting_data_prep.qmd): selecting the fixes that most of the classification methods agree are soaring (ascending) or flapping (the methods included in the consensus can be switched on and off at the top of the notebook), splitting them into bouts, and summarising when and where the eagles soar and how much altitude they gain. This creates the data that will be used to associate soaring with landscape variables (such as elevation, topographic position and ridges), but doesn't do the modelling itself.
 
 ### Models
 
 - [Random Forest](energy_harvesting_random_forest.qmd): associating the soaring bouts (with the flapping bouts as the negative samples, following @Scacco2019-si) with time variables and static landscape features such as topography, using a random forest. The environmental variables are the values at the start location of each bout, from the data prepared in the notebook above.
+- [XGBoost](energy_harvesting_XGBoost.qmd): the same analysis using gradient boosted trees (XGBoost) instead of a random forest, with the same data and cross-validation folds so the two methods can be compared directly. Also uses SHAP values to look at how each variable affects each bout, and whether the effects of the landscape change with the time of day or year.
 
 <!-- Uncomment and fill in as the prediction scripts are added (and add them to the navbar in _quarto.yml)
 

@@ -38,6 +38,7 @@ abstract: |
 # Load packages
 
 ```{r}
+#| cache: false
 
 library(tidyverse)
 packages <- c("terra", "tidyterra", "sf",
@@ -54,7 +55,8 @@ walk(packages, require, character.only = T)
 
 All of the settings that might need changing are in this one chunk.
 
-- `eagle_name` - the eagle to model. This reads that eagle's bouts from `energy_harvesting_data_prep.qmd` (run that script for the same eagle first), and the outputs are saved in a separate folder for each eagle. Run the random forest script for the same eagle first, so the two methods are compared for the same eagle
+- `eagle_names` - the eagles to model. This reads their bouts from `energy_harvesting_data_prep.qmd` (run that script for the same eagles first), and the outputs are saved in a separate folder for each set of eagles (e.g. `xgboost_Tabatha_Stella`). Run the random forest script for the same eagles first, so the two methods are compared for the same data
+- `map_eagle` - the eagle to show in the maps (the eagles can be far apart, so the maps only show one eagle at a time). The models are always fitted to all of the eagles in `eagle_names`
 - `seed` - the random seed. It is the same as in the random forest script, so that the random and day-blocked folds are the same
 - `learning_rate`, `max_rounds` and `early_stopping_rounds` - how the number of boosting rounds is chosen (see the tuning section)
 - `n_threads` - the number of CPU threads that XGBoost uses
@@ -64,8 +66,11 @@ All of the settings that might need changing are in this one chunk.
 
 ```{r}
 
-# the eagle to model
-eagle_name <- "Tabatha"
+# the eagles to model
+eagle_names <- c("Tabatha", "Stella")
+
+# the eagle to show in the maps
+map_eagle <- "Tabatha"
 
 # random seed for the folds, permutations and models (the same as the random forest)
 seed <- 2026
@@ -94,9 +99,9 @@ n_permutations <- 5
 test_run <- FALSE
 
 # folder for the outputs of this script, and the folder with the random forest
-# outputs (one for each eagle)
-out_dir <- paste0("outputs/xgboost_", eagle_name)
-rf_dir <- paste0("outputs/random_forest_", eagle_name)
+# outputs (one for each set of eagles)
+out_dir <- paste0("outputs/xgboost_", paste(eagle_names, collapse = "_"))
+rf_dir <- paste0("outputs/random_forest_", paste(eagle_names, collapse = "_"))
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 # colours for each behaviour (the same as in the other scripts)
@@ -112,7 +117,7 @@ Each row is a soaring or flapping bout (at least 30 seconds of that behaviour, w
 
 ```{r}
 
-combined_bouts <- read_csv(paste0("outputs/combined_bouts_consensus_", eagle_name, ".csv"))
+combined_bouts <- read_csv(paste0("outputs/combined_bouts_consensus_", paste(eagle_names, collapse = "_"), ".csv"))
 
 # number of bouts of each behaviour for each eagle
 combined_bouts %>% count(name, behaviour)
@@ -236,10 +241,12 @@ model_data %>% count(behaviour) %>% mutate(proportion = n / sum(n))
 
 ## Spatial layers
 
-The spatial layers are only used for the prediction maps at the end of the script. They are cropped to the area around all of the bouts (plus a buffer), in the same way as in the random forest script.
+The spatial layers are only used for the prediction maps at the end of the script. They are cropped to the area around the bouts of `map_eagle` (plus a buffer), in the same way as in the random forest script.
 
 ```{r}
+#| cache: false
 
+# (terra rasters can't be saved in the knitr cache, so this chunk is always run)
 # the spatial layers to crop
 raster_files <- c(elevation = "mapping/HS_DEM.tif",
                   tpi_300m = "mapping/TPI_300m.tif",
@@ -247,13 +254,16 @@ raster_files <- c(elevation = "mapping/HS_DEM.tif",
                   ruggedness = "mapping/HS_Ruggedness.tif",
                   aspect = "mapping/Aspect_degrees.tif")
 
-# the area to crop to - the extent of all of the flight locations plus a buffer (m)
+# the bouts of the eagle to map
+map_eagle_bouts <- combined_bouts %>% filter(name == map_eagle)
+
+# the area to crop to - the extent of the bouts plus a buffer (m)
 buffer_m <- 2000
 
-crop_area <- ext(min(combined_bouts$utme) - buffer_m,
-                 max(combined_bouts$utme) + buffer_m,
-                 min(combined_bouts$utmn) - buffer_m,
-                 max(combined_bouts$utmn) + buffer_m) %>%
+crop_area <- ext(min(map_eagle_bouts$utme) - buffer_m,
+                 max(map_eagle_bouts$utme) + buffer_m,
+                 min(map_eagle_bouts$utmn) - buffer_m,
+                 max(map_eagle_bouts$utmn) + buffer_m) %>%
   # the eagle locations are in GDA94 / MGA zone 55
   vect(crs = "EPSG:28355")
 
@@ -550,7 +560,7 @@ model_nrounds
 
 ## Cross-validation of the four models
 
-Each model is fitted to the training folds and predicts the held-out fold, for each cross-validation scheme. We keep the full model fitted in each day and spatial fold, for the permutation importance and the uncertainty in the prediction maps.
+Each model is fitted to the training folds and predicts the held-out fold, for each cross-validation scheme. We keep the full model fitted in each day, spatial and bird fold, for the permutation importance and the uncertainty in the prediction maps.
 
 ```{r}
 
@@ -601,7 +611,7 @@ Sys.time() - start_time
 
 ## Results
 
-The metrics are calculated from the out-of-fold predictions of all of the bouts pooled together, along with the mean and standard deviation of the AUC across the folds. The day-blocked and spatial block results are the ones to use.
+The metrics are calculated from the out-of-fold predictions of all of the bouts pooled together, along with the mean and standard deviation of the AUC across the folds. The day-blocked, spatial block and leave-one-bird-out results are the ones to use.
 
 As for the random forest, the AUC can be below 0.5. For the null model this is an artefact of pooling the folds (its AUC within each fold is exactly 0.5). For the time-only model under the random and spatial folds, it is most likely because soaring and flapping bouts alternate within flights, so the bouts closest in time to a held-out bout (which are in the training data) are often the other behaviour - see the random forest script for more detail.
 
@@ -777,7 +787,7 @@ xgb.importance(model = final_model) %>%
 
 ## Permutation importance
 
-The same as for the random forest - for each full model from the day-blocked and spatial cross-validation folds, we shuffle one variable (or group of variables) in the held-out bouts, and measure how much the AUC drops. Shuffling a group of variables together is preferred when the variables are correlated (see the random forest script for why).
+The same as for the random forest - for each full model from the day-blocked, spatial and leave-one-bird-out cross-validation folds, we shuffle one variable (or group of variables) in the held-out bouts, and measure how much the AUC drops. Shuffling a group of variables together is preferred when the variables are correlated (see the random forest script for why).
 
 ```{r}
 
@@ -864,7 +874,7 @@ importance_summary %>%
                 position = position_dodge(width = 0.8), width = 0.3) +
   geom_vline(xintercept = 0) +
   facet_wrap(~ type, scales = "free_y") +
-  scale_fill_manual(values = c("grey40", "grey75")) +
+  scale_fill_grey(start = 0.25, end = 0.8) +
   labs(x = "Drop in AUC when shuffled", y = NULL, fill = "Cross-validation") +
   theme_bw() +
   theme(legend.position = "bottom")
@@ -1204,7 +1214,7 @@ time_effect %>%
 
 # Prediction maps
 
-The same maps as for the random forest - the final model is predicted to every 30 m cell in the study area, in the middle of summer (15 January) and winter (15 July), at day fractions of 0.25, 0.5 and 0.75.
+The same maps as for the random forest - the final model is predicted to every 30 m cell in the area around the bouts of `map_eagle`, in the middle of summer (15 January) and winter (15 July), at day fractions of 0.25, 0.5 and 0.75.
 
 **These maps show the relative suitability for soaring, not the probability that an eagle soars there** - a high value means that if the eagle is flying there at that time, it is more likely to be soaring than flapping. Cells where any landscape variable is outside the range of the bouts used to fit the model are masked (grey).
 
@@ -1245,7 +1255,7 @@ scenario_day_fractions <- c(0.25, 0.5, 0.75)
 # sunrise and sunset (local time) on each scenario day at the centre of the
 # study area - only used to show the clock times of each scenario
 scenario_sun_times <- getSunlightTimes(date = make_date(2021, 1, 1) + scenario_ydays - 1,
-                                       lat = mean(model_data$lat), lon = mean(model_data$lon),
+                                       lat = mean(map_eagle_bouts$lat), lon = mean(map_eagle_bouts$lon),
                                        keep = c("sunrise", "sunset"), tz = local_tz) %>%
   as_tibble() %>%
   mutate(yday = yday(date)) %>%
@@ -1396,7 +1406,7 @@ suitability_raster
 # Summary of the results
 
 ::: {.callout-note}
-These notes describe the results for Tabatha when this script was written (November 2026). The numbers are filled in when the script is run, but the interpretation will need checking if the data change (e.g. when more eagles are added).
+These notes describe the results for Tabatha and Stella together when this script was written (November 2026). The numbers are filled in when the script is run, but the interpretation will need checking if the data change (e.g. when more eagles are added).
 :::
 
 ```{r}
@@ -1419,14 +1429,14 @@ share_of <- function(t) interaction_share$percent[interaction_share$type == t]
 
 ```
 
-- **XGBoost performs about the same as the random forest.** The full model has an AUC of `r auc_of(cv_results, "day", "full")` for new days (random forest `r auc_of(rf_cv_results, "day", "full")`) and `r auc_of(cv_results, "spatial", "full")` for new areas (random forest `r auc_of(rf_cv_results, "spatial", "full")`), so neither method predicts new areas much better than chance. The fold-by-fold comparison shows that the two methods have similar AUCs for most folds. This suggests that the limit is the information in the predictors, rather than the method.
-- **The tuning made little difference.** Many combinations of settings had almost the same held-out log loss. Early stopping chose `r model_nrounds[["full"]]` rounds for the full model (with a maximum tree depth of `r best_params$max_depth`), and the learning curves show that the training performance keeps improving after this while the held-out performance levels off at an AUC of about 0.55.
-- **As for the random forest, what skill there is comes from the landscape.** The landscape-only model is as good as the full model (AUC `r auc_of(cv_results, "day", "landscape")` for new days), and the time-only model is close to chance (`r auc_of(cv_results, "day", "time")`). The most important groups of variables (permutation importance) for new days are elevation & topographic position, slope & ruggedness, and aspect, while for new areas aspect and slope & ruggedness are more important than elevation & topographic position. The variables with the largest SHAP values are elevation, the topographic position index and eastness.
-- **The directions of the effects match the random forest.** Soaring is more likely at locations that are lower than their surroundings (negative TPI) and at elevations of about 680 to 750 m, and less likely at locations that are higher than their surroundings (positive TPI), at elevations above about 750 m and over east-facing slopes.
-- **The time variables have small effects.** Soaring is relatively less likely just after sunrise and in the last quarter of the day, and less likely in autumn (around March and April) than in late winter and late spring, but these shifts are too small for the time-only model to separate soaring from flapping.
+- **XGBoost performs about the same as the random forest.** The full model has an AUC of `r auc_of(cv_results, "day", "full")` for new days (random forest `r auc_of(rf_cv_results, "day", "full")`), `r auc_of(cv_results, "spatial", "full")` for new areas (random forest `r auc_of(rf_cv_results, "spatial", "full")`) and `r auc_of(cv_results, "bird", "full")` for a new eagle (random forest `r auc_of(rf_cv_results, "bird", "full")`), so neither method predicts new areas or the other eagle much better than chance. The fold-by-fold comparison shows that the two methods have similar AUCs for most of the day-blocked and spatial folds. This suggests that the limit is the information in the predictors, rather than the method.
+- **The tuning made little difference.** Many combinations of settings had almost the same held-out log loss. Early stopping chose `r model_nrounds[["full"]]` rounds for the full model (with a maximum tree depth of `r best_params$max_depth`), and the learning curves show that the training performance keeps improving after this while the held-out performance levels off at an AUC of about 0.54.
+- **As for the random forest, what skill there is comes from the landscape, and it doesn't transfer between the eagles.** The landscape-only model is as good as the full model for new days (AUC `r auc_of(cv_results, "day", "landscape")`), and the time-only model is close to chance (`r auc_of(cv_results, "day", "time")`). For a new eagle, the landscape-only model is close to chance too (`r auc_of(cv_results, "bird", "landscape")`). The most important groups of variables (permutation importance) for new days are elevation & topographic position, aspect, and slope & ruggedness, while aspect is the most important for new areas. The variables with the largest SHAP values are the topographic position index, eastness and elevation.
+- **The directions of the effects match the random forest.** Soaring is more likely at locations that are lower than their surroundings (negative TPI), over west-facing and north-facing slopes, and in Tabatha's range at about 700 to 750 m. It is less likely at locations that are higher than their surroundings, over east-facing slopes, above about 750 m, and at the lowest elevations near the coast (below about 10 m, in Stella's range).
+- **The time variables have small effects.** Soaring is relatively less likely just after sunrise and in the last quarter of the day, and a little less likely in autumn and winter (around April to July) than in late spring (November), but these shifts are too small for the time-only model to separate soaring from flapping.
 - **There is little evidence that the landscape effects change with the time.** The interactions between the time and landscape variables make up `r share_of("time x landscape")`% of the SHAP interaction values (the main effects make up `r share_of("main effect")`%, and the interactions among the landscape variables `r share_of("landscape x landscape")`%), and the SHAP dependence plots mostly don't separate by the time of day or year (apart from a hint that west-facing slopes are used for soaring more in winter than in summer). This agrees with the random forest's ALE curves for subsets of the bouts.
 
-The suggestions for improving the models at the end of the random forest script (multi-scale and path-averaged landscape variables, wind, land cover, and more eagles) apply equally here.
+The suggestions for improving the models at the end of the random forest script (multi-scale and path-averaged landscape variables, wind, land cover, a better DEM for Stella's area, and more eagles) apply equally here.
 
 # References
 

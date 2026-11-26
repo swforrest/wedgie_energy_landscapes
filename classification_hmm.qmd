@@ -926,14 +926,25 @@ eagle_data$hmm4_prob <- apply(hmm4$state_probs(), 1, max)
 
 ```
 
-We also save the behaviour of each state of the 3-state HMM in a `behavior` column, so that the other scripts (such as `classification_agreement.qmd` and `energy_harvesting_data_prep.qmd`) don't need to label the states themselves. The order of the states is set by the initial values (see [Assessing states](#assessing-states) below), but check that these labels still match the plots there whenever the script is re-run.
+We also save the behaviour of each state of the 3-state HMM in a `behavior` column, so that the other scripts (such as `classification_agreement.qmd` and `energy_harvesting_data_prep.qmd`) don't need to label the states themselves. The order of the states is set by the initial values (see [Assessing states](#assessing-states) below), but check that these labels still match the plots there whenever the script is re-run. The labels are set separately for each eagle, so add the labels for any new eagle.
 
 ```{r}
 
-# the behaviour of each state of the 3-state HMM (see 'Assessing states' below)
-state_1 <- "gliding"
-state_2 <- "flapping"
-state_3 <- "ascending"
+# the behaviour of each state of the 3-state HMM, for each eagle (see
+# 'Assessing states' below). The state numbers are arbitrary and can be different
+# for each eagle, so to add an eagle, run the script, check the plots and add
+# its labels here
+if (which_data == "Tabatha") {
+  state_1 <- "gliding"
+  state_2 <- "flapping"
+  state_3 <- "ascending"
+}
+
+if (which_data == "Stella") {
+  state_1 <- "gliding"
+  state_2 <- "flapping"
+  state_3 <- "ascending"
+}
 
 # the behaviour of each fix, from the 3-state HMM
 eagle_data <- eagle_data %>%

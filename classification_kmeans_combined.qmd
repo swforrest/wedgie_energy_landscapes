@@ -631,7 +631,7 @@ for(i in 2:nrow(avg.sils)) lines(2:7, avg.sils[i,],type='b',col='#00000040')
 
 ## Assign the cluster labels to the data
 
-We also save the behaviour of each cluster of the 3-cluster model in a `behavior` column, so that the other scripts (such as `classification_agreement.qmd` and `energy_harvesting_data_prep.qmd`) don't need to label the clusters themselves. The behaviours are identified from the plots in [Assessing clusters](#assessing-clusters) below. The cluster numbers are arbitrary and can change when the data (e.g. a different eagle) or the variables change, so check that these labels still match those plots whenever the script is re-run.
+We also save the behaviour of each cluster of the 3-cluster model in a `behavior` column, so that the other scripts (such as `classification_agreement.qmd` and `energy_harvesting_data_prep.qmd`) don't need to label the clusters themselves. The behaviours are identified from the plots in [Assessing clusters](#assessing-clusters) below. The cluster numbers are arbitrary and can be different for each eagle (and can change when the variables change), so the labels are set separately for each eagle. Check that they still match those plots whenever the script is re-run, and add the labels for any new eagle.
 
 ```{r}
 
@@ -643,10 +643,21 @@ eagle_data <- eagle_data %>%
          k6 = k6$cluster,
          k7 = k7$cluster)
 
-# the behaviour of each cluster of the 3-cluster model (see 'Assessing clusters' below)
-state_1 <- "ascending"
-state_2 <- "flapping"
-state_3 <- "gliding"
+# the behaviour of each cluster of the 3-cluster model, for each eagle (see
+# 'Assessing clusters' below). The cluster numbers are arbitrary and can be different
+# for each eagle, so to add an eagle, run the script, check the plots and add
+# its labels here
+if (which_data == "Tabatha") {
+  state_1 <- "ascending"
+  state_2 <- "flapping"
+  state_3 <- "gliding"
+}
+
+if (which_data == "Stella") {
+  state_1 <- "gliding"
+  state_2 <- "flapping"
+  state_3 <- "ascending"
+}
 
 # the behaviour of each fix, from the 3-cluster model
 eagle_data <- eagle_data %>%

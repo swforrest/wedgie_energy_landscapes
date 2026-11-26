@@ -38,6 +38,7 @@ abstract: |
 # Load packages
 
 ```{r}
+#| cache: false
 
 library(tidyverse)
 packages <- c("leaflet", "terra", "tidyterra", "sf",
@@ -54,7 +55,8 @@ walk(packages, require, character.only = T)
 
 All of the settings that might need changing are in this one chunk.
 
-- `eagle_name` - the eagle to model. This reads that eagle's bouts from `energy_harvesting_data_prep.qmd` (run that script for the same eagle first), and the outputs are saved in a separate folder for each eagle
+- `eagle_names` - the eagles to model. This reads their bouts from `energy_harvesting_data_prep.qmd` (run that script for the same eagles first), and the outputs are saved in a separate folder for each set of eagles (e.g. `random_forest_Tabatha_Stella`)
+- `map_eagle` - the eagle to show in the maps (the eagles can be far apart, so the maps only show one eagle at a time). The models are always fitted to all of the eagles in `eagle_names`
 - `seed` - the random seed, so that the folds, permutations and forests are the same each time the script is run
 - `n_trees` - the number of trees in each random forest (fewer are used while tuning, to be quicker)
 - the number of folds for each type of cross-validation, and the size of the spatial blocks (see the cross-validation section for how these were chosen)
@@ -63,8 +65,11 @@ All of the settings that might need changing are in this one chunk.
 
 ```{r}
 
-# the eagle to model
-eagle_name <- "Tabatha"
+# the eagles to model
+eagle_names <- c("Tabatha", "Stella")
+
+# the eagle to show in the maps
+map_eagle <- "Tabatha"
 
 # random seed for the folds, permutations and forests
 seed <- 2026
@@ -90,8 +95,8 @@ n_permutations <- 5
 # TRUE to only use a random 20% of the days (for testing changes to the script)
 test_run <- FALSE
 
-# folder for the outputs of this script (one for each eagle)
-out_dir <- paste0("outputs/random_forest_", eagle_name)
+# folder for the outputs of this script (one for each set of eagles)
+out_dir <- paste0("outputs/random_forest_", paste(eagle_names, collapse = "_"))
 dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
 # colours for each behaviour (the same as in the other scripts)
@@ -105,7 +110,7 @@ Each row is a soaring or flapping bout (at least 30 seconds of that behaviour, w
 
 ```{r}
 
-combined_bouts <- read_csv(paste0("outputs/combined_bouts_consensus_", eagle_name, ".csv"))
+combined_bouts <- read_csv(paste0("outputs/combined_bouts_consensus_", paste(eagle_names, collapse = "_"), ".csv"))
 
 # number of bouts of each behaviour for each eagle
 combined_bouts %>% count(name, behaviour)
@@ -236,12 +241,14 @@ model_data %>% count(behaviour) %>% mutate(proportion = n / sum(n))
 
 ## Spatial layers
 
-We read in the spatial layers and crop them to the area around all of the flight locations (plus a buffer), so they are quick to plot. Add any other rasters to `raster_files` to include them in the leaflet map below - the names are used as the layer names in the map. The same layers are used to make the prediction maps at the end of the script.
+We read in the spatial layers and crop them to the area around the bouts of `map_eagle` (plus a buffer), so they are quick to plot. Add any other rasters to `raster_files` to include them in the leaflet map below - the names are used as the layer names in the map. The same layers are used to make the prediction maps at the end of the script.
 
-The rasters are at 30 m resolution. If the soaring locations cover a large area (e.g. when using all eagles), uncomment the `aggregate()` line to use a coarser resolution, otherwise the maps will be slow and the leaflet map may hit its size limit.
+The rasters are at 30 m resolution. If the bouts cover a large area, uncomment the `aggregate()` line to use a coarser resolution, otherwise the maps will be slow and the leaflet map may hit its size limit.
 
 ```{r}
+#| cache: false
 
+# (terra rasters can't be saved in the knitr cache, so this chunk is always run)
 # the spatial layers to crop (and add to the leaflet map)
 raster_files <- c(elevation = "mapping/HS_DEM.tif",
                   tpi_300m = "mapping/TPI_300m.tif",
@@ -252,13 +259,16 @@ raster_files <- c(elevation = "mapping/HS_DEM.tif",
                   # landcover2 = "mapping/HS_cover2.tif"
                   )
 
-# the area to crop to - the extent of all of the flight locations plus a buffer (m)
+# the bouts of the eagle to map
+map_eagle_bouts <- combined_bouts %>% filter(name == map_eagle)
+
+# the area to crop to - the extent of the bouts plus a buffer (m)
 buffer_m <- 2000
 
-crop_area <- ext(min(combined_bouts$utme) - buffer_m,
-                 max(combined_bouts$utme) + buffer_m,
-                 min(combined_bouts$utmn) - buffer_m,
-                 max(combined_bouts$utmn) + buffer_m) %>%
+crop_area <- ext(min(map_eagle_bouts$utme) - buffer_m,
+                 max(map_eagle_bouts$utme) + buffer_m,
+                 min(map_eagle_bouts$utmn) - buffer_m,
+                 max(map_eagle_bouts$utmn) + buffer_m) %>%
   # the eagle locations are in GDA94 / MGA zone 55
   vect(crs = "EPSG:28355")
 
@@ -277,7 +287,7 @@ spatial_layers
 
 # Create interactive map of bouts
 
-The start location of each soaring and flapping bout over a satellite (or topographic) basemap. The soaring and flapping bouts are separate layers, so either can be switched off in the layer control (top right) to see the other more clearly. The soaring bouts are drawn on top of the flapping bouts.
+The start location of each soaring and flapping bout of `map_eagle` over a satellite (or topographic) basemap. The soaring and flapping bouts are separate layers, so either can be switched off in the layer control (top right) to see the other more clearly. The soaring bouts are drawn on top of the flapping bouts.
 
 Hover over a bout to see its details and the values of the environmental variables at its start location (the values used in the model). The spatial layers are added as greyscale overlays that can be switched on in the layer control - they are hidden when the map loads.
 
@@ -292,7 +302,7 @@ label_vars <- intersect(c(names(raster_files), "northness", "eastness"),
 
 # hover labels for each bout. We add these to a copy of combined_bouts, so that
 # the label column doesn't end up in the data used for the model
-map_bouts <- combined_bouts %>%
+map_bouts <- map_eagle_bouts %>%
   mutate(label = paste0("<b>", bout_id, "</b><br>",
                         format(with_tz(start, local_tz), "%Y-%m-%d %H:%M"), "<br>",
                         "Duration: ", round(duration_s / 60, 1), " min<br>",
@@ -460,7 +470,7 @@ The question we want to answer is how well the model predicts soaring in conditi
 - **Day-blocked cross-validation** - all of the bouts from the same (local) date are in the same fold, so the model is always tested on days it wasn't trained on. This tests transfer to new days (and new weather).
 - **Spatial block cross-validation** - the study area is split into square blocks, and all of the bouts that started in a block are in the same fold [@Valavi2019-sz]. This tests transfer to new places.
 - **Random 10-fold cross-validation** is also shown, but only as a reference for how optimistic a random split is. It isn't used to judge the model.
-- **Leave-one-bird-out cross-validation** tests transfer to new individuals, which is what we ultimately want for an energy landscape for the whole population. There is currently only one eagle in the data, so this is skipped, but it runs automatically when the data has more than one eagle.
+- **Leave-one-bird-out cross-validation** tests transfer to new individuals, which is what we ultimately want for an energy landscape for the whole population. Each eagle is one fold, so the model is fitted to the other eagles and tested on the eagle that was left out. This only runs when there is more than one eagle in the data.
 
 <!-- TODO: once more eagles are classified and added to combined_bouts, leave-one-bird-out becomes the headline validation (and metrics should also be reported per bird). -->
 
@@ -493,17 +503,19 @@ if (n_distinct(model_data$name) > 1) {
 
 To choose the block size, we estimate the distance over which the response (soaring or flapping) is spatially autocorrelated, from the range of a variogram fitted to the bout start locations (`blockCV::cv_spatial_autocor`). Bouts further apart than this range are roughly independent. The blocks should be at least this size, so that most test bouts are far enough from the training bouts.
 
-For Tabatha, the range is only about 300 m, but bouts also move - a median soaring bout lasts about 2 minutes, in which an eagle can travel a kilometre or more. We therefore use 2 km blocks (several times the range, and longer than most bouts travel). The bouts are within an area of only about 6 × 9 km, so this gives 14 blocks, which are assigned to 5 folds. Larger blocks (3 km) made the folds very unbalanced (from about 800 bouts in one fold to more than 8000 in another).
+We estimate the range separately for each eagle, as the large gaps between the eagles (Tabatha and Stella are about 200 km apart) inflate a range estimated from all of the bouts together (to about 4 km). The range is only about 230 m for Tabatha and 520 m for Stella, but bouts also move - a median soaring bout lasts about 2 minutes, in which an eagle can travel a kilometre or more. We therefore use 2 km blocks (several times the range, and longer than most bouts travel). Each eagle's bouts are within a small area (about 5 × 9 km for Tabatha and 12 × 8 km for Stella), so this gives 34 blocks, which are assigned to 5 folds. When this was run for Tabatha alone, larger blocks (3 km) made the folds very unbalanced (from about 800 bouts in one fold to more than 8000 in another).
 
 ```{r}
 
 # the bout start locations as spatial points (GDA94 / MGA zone 55)
 bouts_sf <- st_as_sf(model_data, coords = c("utme", "utmn"), crs = "EPSG:28355", remove = FALSE)
 
-# range of the spatial autocorrelation in the response (m)
-soaring_autocor <- cv_spatial_autocor(x = bouts_sf, column = "soaring",
-                                      plot = FALSE, progress = FALSE)
-paste0("Range of spatial autocorrelation in soaring = ", round(soaring_autocor$range), " m")
+# range of the spatial autocorrelation in the response (m), for each eagle
+soaring_autocor_range <- map_dbl(set_names(unique(model_data$name)), \(e) {
+  cv_spatial_autocor(x = filter(bouts_sf, name == e), column = "soaring",
+                     plot = FALSE, progress = FALSE)$range
+})
+round(soaring_autocor_range)
 
 # split the area into square blocks, and assign the blocks to folds at random.
 # Of 100 random assignments, cv_spatial keeps the one with the most even folds
@@ -521,15 +533,18 @@ paste0("Number of spatial blocks = ", nrow(spatial_cv$blocks))
 
 ```
 
-The spatial blocks and the bout start locations, coloured by their fold.
+The spatial blocks and the bout start locations of `map_eagle`, coloured by their fold.
 
 ```{r}
 #| fig-width: 8
 #| fig-height: 6
 
 ggplot() +
-  geom_sf(data = bouts_sf, aes(colour = factor(fold_spatial)), size = 0.3, alpha = 0.5) +
-  geom_sf(data = spatial_cv$blocks, fill = NA, colour = "black") +
+  geom_sf(data = filter(bouts_sf, name == map_eagle),
+          aes(colour = factor(fold_spatial)), size = 0.3, alpha = 0.5) +
+  # only the blocks with bouts of the mapped eagle
+  geom_sf(data = st_filter(spatial_cv$blocks, filter(bouts_sf, name == map_eagle)),
+          fill = NA, colour = "black") +
   scale_colour_brewer(palette = "Set1") +
   guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1))) +
   labs(colour = "Spatial fold") +
@@ -675,7 +690,7 @@ We compare four models with exactly the same folds:
 
 Comparing them shows how much of the ability to predict soaring comes from *when* the eagle was flying and how much from *where*, and whether the landscape adds anything once time is known.
 
-We keep the full model fitted in each day and spatial fold, as these are used for the permutation importance and the uncertainty in the prediction maps below.
+We keep the full model fitted in each day, spatial and bird fold, as these are used for the permutation importance and the uncertainty in the prediction maps below.
 
 ```{r}
 
@@ -733,7 +748,7 @@ Sys.time() - start_time
 
 The metrics are calculated from the out-of-fold predictions of all of the bouts pooled together (each bout is predicted once, by the model that didn't see its fold). We also show the mean and standard deviation of the AUC across the folds, which shows how much the performance varies between days or areas.
 
-The day-blocked and spatial block results are the ones to use. The random 10-fold results are only a reference for what a random split would give.
+The day-blocked, spatial block and leave-one-bird-out results are the ones to use. The random 10-fold results are only a reference for what a random split would give.
 
 ```{r}
 
@@ -830,7 +845,7 @@ final_model
 
 ## Permutation importance
 
-How much the model relies on each variable. For each fold model (from the day-blocked and spatial cross-validation), we shuffle the values of one variable in the held-out bouts, which breaks its link with soaring, and measure how much the AUC drops compared to the unshuffled data. A large drop means the model needs that variable to make good predictions for new days or places. We repeat the shuffling `n_permutations` times and average.
+How much the model relies on each variable. For each fold model (from the day-blocked, spatial and leave-one-bird-out cross-validation), we shuffle the values of one variable in the held-out bouts, which breaks its link with soaring, and measure how much the AUC drops compared to the unshuffled data. A large drop means the model needs that variable to make good predictions for new days or places. We repeat the shuffling `n_permutations` times and average.
 
 Using the held-out bouts (rather than the training data, or the 'impurity' importance that `ranger` can calculate) measures how much each variable helps to predict *new* data, rather than how much the forest used it to fit the training data, which is biased towards continuous variables with many possible split points.
 
@@ -909,7 +924,7 @@ importance_summary %>%
 
 ```
 
-The drop in AUC when each group (left) or variable (right) is shuffled, for the day-blocked and spatial cross-validation folds. The error bars are ± 1 standard deviation across the folds.
+The drop in AUC when each group (left) or variable (right) is shuffled, for the day-blocked, spatial and leave-one-bird-out cross-validation folds. The error bars are ± 1 standard deviation across the folds.
 
 ```{r}
 #| fig-width: 10
@@ -925,7 +940,7 @@ importance_summary %>%
                 position = position_dodge(width = 0.8), width = 0.3) +
   geom_vline(xintercept = 0) +
   facet_wrap(~ type, scales = "free_y") +
-  scale_fill_manual(values = c("grey40", "grey75")) +
+  scale_fill_grey(start = 0.25, end = 0.8) +
   labs(x = "Drop in AUC when shuffled", y = NULL, fill = "Cross-validation") +
   theme_bw() +
   theme(legend.position = "bottom")
@@ -1140,7 +1155,7 @@ subset_ale %>%
 
 # Prediction maps
 
-We predict the final model to every 30 m cell in the study area, for six times:
+We predict the final model to every 30 m cell in the area around the bouts of `map_eagle`, for six times:
 
 - the middle of summer (15 January, day 15) and the middle of winter (15 July, day 196)
 - at day fractions of 0.25, 0.5 and 0.75 (a quarter, half and three quarters of the way from sunrise to sunset). The table below shows the local clock times that these correspond to at the centre of the study area
@@ -1174,10 +1189,12 @@ prediction_stack$eastness <- ifel(prediction_stack$aspect == -1, 0, sin(predicti
 
 # check - the largest difference between the stacked layers and combined_bouts at
 # the bout start locations (should be 0, or a tiny rounding difference)
+# the bout start locations of the mapped eagle (should be 0, or a tiny rounding difference)
+map_data <- model_data %>% filter(name == map_eagle)
 stack_check <- terra::extract(prediction_stack[[landscape_vars]],
-                              vect(cbind(model_data$utme, model_data$utmn), crs = "EPSG:28355"),
+                              vect(cbind(map_data$utme, map_data$utmn), crs = "EPSG:28355"),
                               ID = FALSE)
-map_dbl(set_names(landscape_vars), \(v) max(abs(stack_check[[v]] - model_data[[v]])))
+map_dbl(set_names(landscape_vars), \(v) max(abs(stack_check[[v]] - map_data[[v]])))
 
 # one row for each cell with all of the landscape variables (i.e. on land)
 # (when these are plotted with geom_raster, ggplot warns that the pixels are at
@@ -1209,7 +1226,7 @@ scenario_day_fractions <- c(0.25, 0.5, 0.75)
 # sunrise and sunset (local time) on each scenario day at the centre of the
 # study area - only used to show the clock times of each scenario
 scenario_sun_times <- getSunlightTimes(date = make_date(2021, 1, 1) + scenario_ydays - 1,
-                                       lat = mean(model_data$lat), lon = mean(model_data$lon),
+                                       lat = mean(map_eagle_bouts$lat), lon = mean(map_eagle_bouts$lon),
                                        keep = c("sunrise", "sunset"), tz = local_tz) %>%
   as_tibble() %>%
   mutate(yday = yday(date)) %>%
@@ -1364,7 +1381,7 @@ suitability_raster
 # Summary of the results
 
 ::: {.callout-note}
-These notes describe the results for Tabatha when this script was written (November 2026). The numbers are filled in when the script is run, but the interpretation will need checking if the data change (e.g. when more eagles are added).
+These notes describe the results for Tabatha and Stella together when this script was written (November 2026). The numbers are filled in when the script is run, but the interpretation will need checking if the data change (e.g. when more eagles are added).
 :::
 
 ```{r}
@@ -1376,11 +1393,12 @@ auc_of <- function(s, m) {
 
 ```
 
-- **The predictive performance is weak.** The full model has an AUC of `r auc_of("day", "full")` for new days and `r auc_of("spatial", "full")` for new areas, so the time and the landscape at the start of a bout only just separate soaring from flapping, and the model barely transfers to new areas. The predicted probabilities are roughly calibrated where most of the bouts are, but almost all of them are between about 0.3 and 0.7 (see the calibration plots and the maps).
-- **What skill there is comes from the landscape.** The landscape-only model is about as good as the full model (AUC `r auc_of("day", "landscape")` for new days and `r auc_of("spatial", "landscape")` for new areas), while the time-only model is close to chance for new days (`r auc_of("day", "time")`). The proportion of soaring bouts changes a little through the year (lowest in autumn, around March and April, and highest in late winter and late spring) and through the day (less soaring just after sunrise and in the last quarter of the day), but these shifts are only a few percent.
-- **Elevation & topographic position is the most important group of variables for new days**, followed by aspect and slope & ruggedness. Soaring is more likely at locations that are lower than their surroundings (negative TPI, such as valleys and the bottoms of slopes) and less likely at locations that are higher than their surroundings (positive TPI), as it was for Stella. It is also a little more likely over west-facing than east-facing slopes, and at elevations of about 680 to 750 m than at lower or higher elevations. These effects are small - each changes the probability of soaring by up to about 0.05.
-- **Elevation helps to predict new days but not new areas.** Tabatha's bouts cover a narrow range of elevations (about 550 to 830 m), so elevation mostly picks out particular parts of her range, which doesn't help when predicting areas the model hasn't seen. For new areas, aspect, slope & ruggedness and elevation & topographic position are about equally (un)important.
-- **There is little evidence that the landscape effects change with the season or time of day** - the ALE curves for the subsets of bouts have similar shapes, apart from a hint that west-facing slopes are used for soaring more in winter than in summer.
+- **The predictive performance is still weak with two eagles.** The full model has an AUC of `r auc_of("day", "full")` for new days, `r auc_of("spatial", "full")` for new areas and `r auc_of("bird", "full")` for a new eagle, so the time and the landscape at the start of a bout only just separate soaring from flapping. This is about the same as the model for Tabatha on her own (an AUC of 0.55 for new days), and the two eagles' bouts are predicted about equally well for new days.
+- **The model doesn't transfer between the eagles.** In the leave-one-bird-out cross-validation, the landscape-only model is no better than chance (AUC `r auc_of("bird", "landscape")`), so a model fitted to one eagle can't tell which of the other eagle's bouts are soaring. The landscape variables that help most for new days (elevation and TPI) don't help at all for the other eagle, and only the time of day helps a little. The two eagles' landscapes barely overlap - Tabatha's bouts start at about 540 to 810 m in the highlands, and Stella's at 0 to 120 m near the north-east coast - so the model has to extrapolate to the other eagle's landscape.
+- **The elevation layer is terraced in Stella's area.** About half of Stella's bouts start in cells with an elevation of exactly 10 m, and the DEM around her has spikes at exactly 10, 20, 30, 40 and 50 m (it looks like it was interpolated from 10 m contours, and `TAS_DEM.tif` is the same). Most of these cells have a slope of 0 and no aspect, so the landscape variables carry less information for Stella than for Tabatha. A better DEM for this area (e.g. from LiDAR) is worth getting before reading much into her results.
+- **What skill there is comes from the landscape.** The landscape-only model is as good as the full model (AUC `r auc_of("day", "landscape")` for new days and `r auc_of("spatial", "landscape")` for new areas), while the time-only model is close to chance for new days (`r auc_of("day", "time")`). The proportion of soaring bouts is a little lower in autumn and winter (April to July) than in late spring (November), and lower just after sunrise and in the last quarter of the day, but these shifts are only a few percent.
+- **Elevation & topographic position is the most important group of variables for new days**, followed by aspect and slope & ruggedness, while aspect is the most important for new areas. Soaring is more likely at locations that are lower than their surroundings (negative TPI) and less likely at locations that are higher (positive TPI), a little more likely over west-facing than east-facing slopes, and in Tabatha's range most likely at about 680 to 750 m. These effects are small - each changes the probability of soaring by up to about 0.05. The elevation curve is flat between about 120 and 540 m, where there are no bouts.
+- **There is little evidence that the landscape effects change with the season or time of day** - the ALE curves for the subsets of bouts have very similar shapes.
 - **The random split gives a lower AUC than the day-blocked split**, rather than the higher AUC we would expect if it were too optimistic, and the time-only model is well below chance with a random split (`r auc_of("random", "time")`). This is because soaring and flapping bouts alternate within each flight (see [Why can the AUC be below 0.5?](#results)), and is another sign that bouts that are close in time aren't independent.
 - The spatial cross-validation gives a lower AUC than the day-blocked cross-validation, so the model transfers less well to new areas than to new days within the areas it has seen.
 
@@ -1388,8 +1406,9 @@ Some likely reasons for the weak signal, and things to try next:
 
 - The landscape is only measured in the 30 m cell at the start of each bout, but thermals form over larger areas, and slope lift depends on the terrain upwind. Multi-scale versions of the variables (e.g. means within 250 m to 1 km), or values averaged along the path of each bout, may capture this better.
 - Slope (orographic) lift depends on the wind speed and direction relative to the slope, and thermals depend on the weather, neither of which are in the model. Adding wind (e.g. from a weather reanalysis) and its alignment with the slope is likely to help the most.
-- Land cover (the `HS_cover` rasters) isn't included yet.
-- There is only one eagle, so we can't yet test whether the model transfers to other individuals (leave-one-bird-out cross-validation).
+- Land cover (the `HS_cover` rasters) isn't included yet. This may matter more with eagles in different landscapes (e.g. Stella's coastal plain and Tabatha's highlands).
+- A better DEM for Stella's area (see above).
+- With only two eagles in very different landscapes, the leave-one-bird-out cross-validation can't tell whether the model fails to transfer because the eagles use the landscape differently, or because their landscapes don't overlap. More eagles, especially ones that share similar landscapes, would help.
 
 # References
 

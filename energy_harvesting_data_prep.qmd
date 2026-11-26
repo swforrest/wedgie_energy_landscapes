@@ -72,15 +72,43 @@ n_majority
 
 # Import data from the model outputs
 
+The classification scripts are run for one eagle at a time, and each saves a CSV with the eagle's name at the end (e.g. `eagle_states_hmm_Tabatha.csv`). We read in the CSVs of all of the eagles in `eagle_names` and stack them, so there is one dataframe for each method. Each eagle needs a CSV from every classification script (run each script with `which_data` set to that eagle).
+
+The eagles can be far apart (e.g. Tabatha and Stella are about 200 km apart), so the flight segment plot and the maps only show one eagle at a time (`map_eagle`). Everything else, including the bout data that is saved at the end, uses all of the eagles.
+
 ```{r}
 
-eagle_name <- "Tabatha"
+# the eagles to include
+eagle_names <- c("Tabatha", "Stella")
 
-kmeans_instantaneous <- read_csv(paste0("outputs/eagle_states_kmeans_instantaneous_", eagle_name, ".csv"))
-kmeans_aggregated <- read_csv(paste0("outputs/eagle_states_kmeans_aggregated_", eagle_name, ".csv"))
-kmeans_combined <- read_csv(paste0("outputs/eagle_states_kmeans_combined_", eagle_name, ".csv"))
-hmm <- read_csv(paste0("outputs/eagle_states_hmm_", eagle_name, ".csv"))
-embc <- read_csv(paste0("outputs/eagle_states_embc_aggregated_", eagle_name, ".csv"))
+# the eagle to show in the flight segment plot and the maps
+map_eagle <- "Tabatha"
+
+# read in the CSVs of all of the eagles for each method, and stack them
+kmeans_instantaneous <- paste0("outputs/eagle_states_kmeans_instantaneous_", eagle_names, ".csv") %>%
+  map(read_csv) %>%
+  bind_rows()
+kmeans_aggregated <- paste0("outputs/eagle_states_kmeans_aggregated_", eagle_names, ".csv") %>%
+  map(read_csv) %>%
+  bind_rows()
+kmeans_combined <- paste0("outputs/eagle_states_kmeans_combined_", eagle_names, ".csv") %>%
+  map(read_csv) %>%
+  bind_rows()
+hmm <- paste0("outputs/eagle_states_hmm_", eagle_names, ".csv") %>%
+  map(read_csv) %>%
+  bind_rows()
+embc <- paste0("outputs/eagle_states_embc_aggregated_", eagle_names, ".csv") %>%
+  map(read_csv) %>%
+  bind_rows()
+
+# number of fixes of each eagle for each method
+bind_rows(kmeans_inst = count(kmeans_instantaneous, name),
+          kmeans_agg = count(kmeans_aggregated, name),
+          kmeans_comb = count(kmeans_combined, name),
+          hmm = count(hmm, name),
+          embc = count(embc, name),
+          .id = "method") %>%
+  pivot_wider(names_from = name, values_from = n)
 
 ```
 
@@ -219,7 +247,7 @@ eagle_states <- eagle_states %>%
 
 # Agreement through a flight segment
 
-Choose a flight segment to explore, and look at the states from each method through time, along with the flight variables. The segment is chosen to be the one closest to *n* fixes, but you can change it to any other flight segment by changing `flight_n_explore` below.
+Choose a flight segment of `map_eagle` to explore, and look at the states from each method through time, along with the flight variables. The segment is chosen to be the one closest to *n* fixes, but you can change it to any other flight segment by changing `flight_n_explore` below.
 
 ```{r}
 
@@ -227,11 +255,12 @@ flight_length <- 1500 # in number of locations
 
 # choose a flight segment - here the one closest to n locations
 # (replace flight_n_explore with any other flight_n to explore a different flight)
-flight_counts <- eagle_states %>% count(flight_n)
+# (the flight numbers start again for each eagle, so we only use the mapped eagle)
+flight_counts <- eagle_states %>% filter(name == map_eagle) %>% count(flight_n)
 flight_n_explore <- flight_counts$flight_n[which.min(abs(flight_counts$n - flight_length))]
 
 segment_explore <- eagle_states %>%
-  filter(flight_n == flight_n_explore) %>%
+  filter(name == map_eagle, flight_n == flight_n_explore) %>%
   arrange(stepend_dtime) %>%
   # number the fixes in the segment
   mutate(fix = row_number())
@@ -547,15 +576,15 @@ flapping_bouts <- flapping_locations %>%
     alt_gain_m = sum(F_Vrate * step_s),
     mean_Vrate = mean(F_Vrate),
     # the start of the bout (in UTM for ggplot and lat/lon for leaflet)
-    utme = first(stepend_utme, order_by = stepstart_dtime),
-    utmn = first(stepend_utmn, order_by = stepstart_dtime),
-    lat  = first(lat,          order_by = stepstart_dtime),
-    lon  = first(lon,          order_by = stepstart_dtime),
+    utme_start = first(stepend_utme, order_by = stepstart_dtime),
+    utmn_start = first(stepend_utmn, order_by = stepstart_dtime),
+    lat_start  = first(lat,          order_by = stepstart_dtime),
+    lon_start  = first(lon,          order_by = stepstart_dtime),
     # the centre of the bout (in UTM for ggplot and lat/lon for leaflet)
-    utme_mean = mean(stepend_utme),
-    utmn_mean = mean(stepend_utmn),
-    lat_mean = mean(lat),
-    lon_mean = mean(lon),
+    utme = mean(stepend_utme),
+    utmn = mean(stepend_utmn),
+    lat = mean(lat),
+    lon = mean(lon),
     .groups = "drop"
   )
 
@@ -646,7 +675,7 @@ eagle_states %>%
 
 # Behaviours through time
 
-The timestamps are in UTC, so we convert them to local Tasmanian time (which accounts for daylight saving) before getting the date and hour of the day.
+These plots combine all of the eagles in `eagle_names`. The timestamps are in UTC, so we convert them to local Tasmanian time (which accounts for daylight saving) before getting the date and hour of the day.
 
 For each fix we also calculate the altitude gained or lost during that step (`step_alt_gain_m`), so that the altitude gained in each hour or day comes from the fixes in that hour or day (a bout that runs from 11:55 to 12:10 is split between the 11:00 and 12:00 hours). The number of bouts is counted by the time that each bout started.
 
@@ -928,9 +957,9 @@ flapping_locations %>%
 
 ## Spatial layers
 
-We read in the spatial layers and crop them to the area around all of the flight locations (plus a buffer), so they are quick to plot. We use all of the flight locations rather than only the soaring locations so that the grid used to calculate the proportion of time soaring (below) covers the areas where the eagles flew but didn't soar. Add any other rasters to `raster_files` to include them in the leaflet map below - the names are used as the layer names in the map.
+We read in the spatial layers and crop them to the area around all of the flight locations of `map_eagle` (plus a buffer), so they are quick to plot. We use all of the flight locations rather than only the soaring locations so that the grid used to calculate the proportion of time soaring (below) covers the areas where the eagles flew but didn't soar. Add any other rasters to `raster_files` to include them in the leaflet map below - the names are used as the layer names in the map.
 
-The rasters are at 30 m resolution. If the soaring locations cover a large area (e.g. when using all eagles), uncomment the `aggregate()` line to use a coarser resolution, otherwise the maps will be slow and the leaflet map may hit its size limit.
+The rasters are at 30 m resolution. If the flight locations cover a large area, uncomment the `aggregate()` line to use a coarser resolution, otherwise the maps will be slow and the leaflet map may hit its size limit.
 
 ```{r}
 
@@ -944,13 +973,16 @@ raster_files <- c(elevation = "mapping/HS_DEM.tif",
                   # landcover2 = "mapping/HS_cover2.tif"
                   )
 
-# the area to crop to - the extent of all of the flight locations plus a buffer (m)
+# the flight locations of the eagle to map
+map_locations <- eagle_states %>% filter(name == map_eagle)
+
+# the area to crop to - the extent of the flight locations plus a buffer (m)
 buffer_m <- 2000
 
-crop_area <- ext(min(eagle_states$stepend_utme) - buffer_m,
-                 max(eagle_states$stepend_utme) + buffer_m,
-                 min(eagle_states$stepend_utmn) - buffer_m,
-                 max(eagle_states$stepend_utmn) + buffer_m) %>%
+crop_area <- ext(min(map_locations$stepend_utme) - buffer_m,
+                 max(map_locations$stepend_utme) + buffer_m,
+                 min(map_locations$stepend_utmn) - buffer_m,
+                 max(map_locations$stepend_utmn) + buffer_m) %>%
   # the eagle locations are in GDA94 / MGA zone 55
   vect(crs = "EPSG:28355")
 
@@ -969,7 +1001,7 @@ spatial_layers
 
 ## Static maps
 
-Maps of the soaring locations, the altitude gained in hexagonal cells, and the centres of each soaring bout. Elevation contours are shown in grey (every `contour_m` metres).
+Maps of the soaring and flapping locations of `map_eagle`, the altitude gained in hexagonal cells, and the centres of each bout. Elevation contours are shown in grey (every `contour_m` metres).
 
 ::: {.panel-tabset}
 
@@ -992,7 +1024,7 @@ ggplot() +
   geom_spatraster_contour(data = spatial_layers$elevation,
                           breaks = seq(0, 2000, by = contour_m),
                           colour = "black", linewidth = 0.2) +
-  geom_point(data = soaring_locations,
+  geom_point(data = soaring_locations %>% filter(name == map_eagle),
              aes(x = stepend_utme, y = stepend_utmn),
              colour = state_colours["ascending"], size = 0.1, alpha = 0.1) +
   labs(x = NULL, y = NULL) +
@@ -1015,7 +1047,7 @@ ggplot() +
   geom_spatraster_contour(data = spatial_layers$elevation,
                           breaks = seq(0, 2000, by = contour_m),
                           colour = "grey70", linewidth = 0.2) +
-  stat_summary_hex(data = soaring_locations,
+  stat_summary_hex(data = soaring_locations %>% filter(name == map_eagle),
                    aes(x = stepend_utme, y = stepend_utmn, z = step_alt_gain_m),
                    fun = sum, binwidth = hex_width_m, alpha = 0.9) +
   scale_fill_viridis_c(option = "magma") +
@@ -1036,7 +1068,7 @@ ggplot() +
   geom_spatraster_contour(data = spatial_layers$elevation,
                           breaks = seq(0, 2000, by = contour_m),
                           colour = "grey70", linewidth = 0.2) +
-  geom_point(data = soaring_bouts %>% arrange(alt_gain_m),
+  geom_point(data = soaring_bouts %>% filter(name == map_eagle) %>% arrange(alt_gain_m),
              aes(x = utme, y = utmn, colour = alt_gain_m),
              size = 1, alpha = 0.8) +
   scale_colour_viridis_c() +
@@ -1063,7 +1095,7 @@ ggplot() +
   geom_spatraster_contour(data = spatial_layers$elevation,
                           breaks = seq(0, 2000, by = contour_m),
                           colour = "black", linewidth = 0.2) +
-  geom_point(data = flapping_locations,
+  geom_point(data = flapping_locations %>% filter(name == map_eagle),
              aes(x = stepend_utme, y = stepend_utmn),
              colour = state_colours["flapping"], size = 0.1, alpha = 0.1) +
   labs(x = NULL, y = NULL) +
@@ -1083,7 +1115,7 @@ ggplot() +
   geom_spatraster_contour(data = spatial_layers$elevation,
                           breaks = seq(0, 2000, by = contour_m),
                           colour = "grey70", linewidth = 0.2) +
-  stat_summary_hex(data = flapping_locations,
+  stat_summary_hex(data = flapping_locations %>% filter(name == map_eagle),
                    aes(x = stepend_utme, y = stepend_utmn, z = step_alt_gain_m),
                    fun = sum, binwidth = hex_width_m, alpha = 0.9) +
   scale_fill_viridis_c(option = "magma") +
@@ -1104,7 +1136,7 @@ ggplot() +
   geom_spatraster_contour(data = spatial_layers$elevation,
                           breaks = seq(0, 2000, by = contour_m),
                           colour = "grey70", linewidth = 0.2) +
-  geom_point(data = flapping_bouts %>% arrange(alt_gain_m),
+  geom_point(data = flapping_bouts %>% filter(name == map_eagle) %>% arrange(alt_gain_m),
              aes(x = utme, y = utmn, colour = alt_gain_m),
              size = 1, alpha = 0.8) +
   scale_colour_viridis_c() +
@@ -1123,19 +1155,22 @@ The centre of each soaring bout over a satellite (or topographic) basemap, colou
 
 ```{r}
 
+# the soaring bouts of the eagle to map
+map_bouts <- soaring_bouts %>% filter(name == map_eagle)
+
 # colour palette for the altitude gained in each bout
-bout_palette <- colorNumeric("viridis", domain = soaring_bouts$alt_gain_m)
+bout_palette <- colorNumeric("viridis", domain = map_bouts$alt_gain_m)
 
 # hover labels for each bout
-bout_labels <- paste0("<b>", soaring_bouts$bout_id, "</b><br>",
-                      format(soaring_bouts$start_local, "%Y-%m-%d %H:%M"), "<br>",
-                      "Duration: ", round(soaring_bouts$duration_s / 60, 1), " min<br>",
-                      "Altitude gained: ", round(soaring_bouts$alt_gain_m), " m<br>",
-                      "Mean vertical rate: ", round(soaring_bouts$mean_Vrate, 2), " m/s") %>%
+bout_labels <- paste0("<b>", map_bouts$bout_id, "</b><br>",
+                      format(map_bouts$start_local, "%Y-%m-%d %H:%M"), "<br>",
+                      "Duration: ", round(map_bouts$duration_s / 60, 1), " min<br>",
+                      "Altitude gained: ", round(map_bouts$alt_gain_m), " m<br>",
+                      "Mean vertical rate: ", round(map_bouts$mean_Vrate, 2), " m/s") %>%
   map(htmltools::HTML)
 
 # basemaps
-soaring_map <- leaflet(soaring_bouts, height = 650, width = "100%",
+soaring_map <- leaflet(map_bouts, height = 650, width = "100%",
                        options = leafletOptions(preferCanvas = TRUE)) %>%
   addProviderTiles(providers$Esri.WorldImagery, group = "Satellite") %>%
   addProviderTiles(providers$OpenTopoMap, group = "Topographic")
@@ -1178,7 +1213,7 @@ Each fix is assigned to a cell by the location at the end of its step (the same 
 
 - The flight time includes every fix that was classified by all of the included methods (including fixes with no majority), as in the 'Time spent soaring' section above.
 - The soaring time only includes the soaring fixes in bouts of at least `min_bout_s`, so the soaring fixes in shorter bouts count towards the flight time but not the soaring time.
-- The cells are combined across eagles. To calculate them separately for each eagle, add `name` to both `group_by()` calls (the maps would then need to be filtered to one eagle).
+- The cells are only calculated for `map_eagle`, as the grid only covers the area around its flight locations (see [Spatial layers](#spatial-layers)). Change `map_eagle` at the top of the notebook to map a different eagle.
 
 ## Behvaioural time in each cell
 
@@ -1194,32 +1229,36 @@ behaviour_grid <- aggregate(spatial_layers$elevation,
 
 behaviour_grid
 
-# the grid cell that each fix is in (from the end location of each step)
-eagle_states <- eagle_states %>%
+# the fixes of the eagle to map, and the grid cell that each fix is in (from the
+# end location of each step)
+map_states <- eagle_states %>%
+  filter(name == map_eagle) %>%
   mutate(cell = cellFromXY(behaviour_grid, cbind(stepend_utme, stepend_utmn)))
 
-soaring_locations <- soaring_locations %>%
+map_soaring <- soaring_locations %>%
+  filter(name == map_eagle) %>%
   mutate(cell = cellFromXY(behaviour_grid, cbind(stepend_utme, stepend_utmn)))
 
-flapping_locations <- flapping_locations %>%
+map_flapping <- flapping_locations %>%
+  filter(name == map_eagle) %>%
   mutate(cell = cellFromXY(behaviour_grid, cbind(stepend_utme, stepend_utmn)))
 
 # check that all of the fixes are inside the grid (this should be 0)
-sum(is.na(eagle_states$cell))
+sum(is.na(map_states$cell))
 
 # flight time in each cell
-behaviour_cells <- eagle_states %>%
+behaviour_cells <- map_states %>%
   group_by(cell) %>%
   summarise(n_fixes = n(),
             flight_s = sum(step_s)) %>%
   # soaring time in each cell
-  left_join(soaring_locations %>%
+  left_join(map_soaring %>%
               group_by(cell) %>%
               summarise(n_soaring_fixes = n(),
                         soaring_s = sum(step_s)),
             by = "cell") %>%
   # flapping time in each cell
-  left_join(flapping_locations %>%
+  left_join(map_flapping %>%
               group_by(cell) %>%
               summarise(n_flapping_fixes = n(),
                         flapping_s = sum(step_s)),
@@ -1405,7 +1444,7 @@ combined_bouts %>% count(behaviour, soaring)
 
 ### Add environmental variables
 
-We extract the value of each spatial layer at the start location of each bout (`utme` and `utmn`, which are in GDA94 / MGA zone 55). Each bout gets the value of the 30 m cell that its start location falls in.
+We extract the value of each spatial layer at the start location of each bout (`utme` and `utmn`, which are in GDA94 / MGA zone 55). Each bout gets the value of the 30 m cell that its start location falls in. We use the full rasters rather than the cropped layers above, as those only cover the area around `map_eagle`.
 
 Some of the rasters are in a slightly different crs (e.g. the slope and aspect layers), so the start locations are projected to the crs of each raster before extracting, in the same way as when cropping the rasters above.
 
@@ -1427,7 +1466,9 @@ bout_points <- vect(cbind(combined_bouts$utme, combined_bouts$utmn),
 # extract the value of each spatial layer at the start location of each bout.
 # This gives a list with one vector for each layer, which we turn into a
 # dataframe with one column for each layer (named as in raster_files)
-bout_env <- map(spatial_layers, \(r) {
+bout_env <- map(raster_files, \(f) {
+  # read in the full raster (not cropped, so it covers all of the eagles)
+  r <- rast(f)
   # project the points to the crs of the raster
   points_r <- project(bout_points, crs(r))
   # extract the values (ID = FALSE drops the ID column, and [[1]] takes the
@@ -1457,7 +1498,7 @@ combined_bouts %>%
 
 ### Plot the bout locations
 
-The start location of each bout, coloured by the behaviour and by each of the environmental variables (one tab for each). Bouts with a missing value (e.g. over the sea) are shown in grey.
+The start location of each bout of `map_eagle`, coloured by the behaviour and by each of the environmental variables (one tab for each). Bouts with a missing value (e.g. over the sea) are shown in grey.
 
 ```{r}
 #| results: asis
@@ -1471,6 +1512,7 @@ cat("::: {.panel-tabset}\n\n")
 for (variable in plotting_variables) {
 
   p <- combined_bouts %>%
+    filter(name == map_eagle) %>%
     # shuffle the rows, so the flapping bouts (which are after the soaring
     # bouts in the dataframe) aren't all plotted on top of the soaring bouts
     slice_sample(prop = 1) %>%
@@ -1505,7 +1547,9 @@ cat("\n\n:::\n")
 
 ```{r}
 
-write_csv(combined_bouts, paste0("outputs/combined_bouts_consensus_", eagle_name, ".csv"))
+# the file name has the names of all of the eagles, e.g.
+# combined_bouts_consensus_Tabatha_Stella.csv
+write_csv(combined_bouts, paste0("outputs/combined_bouts_consensus_", paste(eagle_names, collapse = "_"), ".csv"))
 
 ```
 

@@ -7,7 +7,7 @@ bibliography: references.bib
 
 This site collects the analysis notebooks for modelling the flight behaviour of GPS-tracked wedge-tailed eagles (*Aquila audax fleayi*) in Tasmania.
 
-The notebooks currently show the results for one eagle (Tabatha). The eagle is chosen at the top of each notebook (`which_data` in the classification notebooks, and `eagle_name` in the others).
+The classification and agreement notebooks are run for one eagle at a time, and currently show the results for Tabatha (the eagle is chosen at the top of each notebook, with `which_data` in the classification notebooks and `eagle_name` in the agreement notebook). The energy landscape notebooks combine the bouts of all of the eagles in `eagle_names` (currently Tabatha and Stella), and their maps show one eagle at a time (`map_eagle`).
 
 ## Behaviour classification
 
